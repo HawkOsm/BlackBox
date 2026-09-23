@@ -1,8 +1,6 @@
-
-
 pub fn init_database() {
     // Initialize the database
-    use rusqlite::{Connection};
+    use rusqlite::Connection;
     let conn = Connection::open("db.sqlite").unwrap();
     let query = "
         CREATE TABLE IF NOT EXISTS messages (
@@ -16,12 +14,12 @@ pub fn init_database() {
         CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
 
         CREATE TABLE IF NOT EXISTS custom (
-            custom_id  INTEGER PRIMARY KEY,
-            ts         TEXT    NOT NULL,
-            event_type TEXT    NOT NULL,  -- 'fork' | 'exec' | 'exit'
-            pid        INTEGER NOT NULL,
-            ppid       INTEGER,
-            cpu        INTEGER
+            custom_id   INTEGER PRIMARY KEY,
+            ts          TEXT    NOT NULL,
+            pid         INTEGER NOT NULL,
+            ppid        INTEGER,
+            exit_code   INTEGER NOT NULL,  -- raw wait status: signal in low 7 bits, exit status << 8
+            comm        TEXT               -- process name, best-effort
         );
 
         CREATE TABLE IF NOT EXISTS journald (
@@ -54,7 +52,6 @@ pub fn init_database() {
     conn.execute_batch(query).unwrap();
 }
 
-
 fn convert_to_unix_timestamp(ts: i64) -> String {
     let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0).unwrap();
     let readable = dt.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -62,61 +59,117 @@ fn convert_to_unix_timestamp(ts: i64) -> String {
 }
 
 fn add_message(source: &str, ref_id: i64, ts: String, severity: &str, summary: &str) {
-    use rusqlite::{Connection};
+    use rusqlite::Connection;
     let conn = Connection::open("db.sqlite").unwrap();
     let query = "
         INSERT INTO messages (source, ref_id, ts, severity, summary)
         VALUES (?1, ?2, ?3, ?4, ?5);
     ";
-    conn.execute(query, rusqlite::params!(source, ref_id, ts, severity, summary)).unwrap();
+    conn.execute(
+        query,
+        rusqlite::params!(source, ref_id, ts, severity, summary),
+    )
+    .unwrap();
 }
 
-pub fn add_custom_event(ts: i64, event_type: &str, pid: i32, ppid: Option<i32>, cpu: Option<i32>) {
-    use rusqlite::{Connection};
+pub fn add_custom_event(
+    ts: i64,
+    pid: i32,
+    ppid: Option<i32>,
+    exit_code: i32,
+    comm: Option<&str>,
+    severity: &str,
+    summary: &str,
+) {
+    use rusqlite::Connection;
     let ts = convert_to_unix_timestamp(ts);
     let conn = Connection::open("db.sqlite").unwrap();
     let query = "
-        INSERT INTO custom (ts, event_type, pid, ppid, cpu)
+        INSERT INTO custom (ts, pid, ppid, exit_code, comm)
         VALUES (?1, ?2, ?3, ?4, ?5);
     ";
-    conn.execute(query, rusqlite::params!(ts, event_type, pid, ppid, cpu)).unwrap();
+    conn.execute(query, rusqlite::params!(ts, pid, ppid, exit_code, comm))
+        .unwrap();
 
-    add_message("custom", conn.last_insert_rowid(), ts, "info", &format!("Custom event: {} for PID {}", event_type, pid));
+    add_message("custom", conn.last_insert_rowid(), ts, severity, summary);
 }
-pub fn add_journald_event(ts: i64, priority: i32, unit: Option<&str>, pid: Option<i32>, message: &str) {
-    use rusqlite::{Connection};
+
+pub fn add_journald_event(
+    ts: i64,
+    priority: i32,
+    unit: Option<&str>,
+    pid: Option<i32>,
+    message: &str,
+) {
+    use rusqlite::Connection;
     let ts = convert_to_unix_timestamp(ts);
     let conn = Connection::open("db.sqlite").unwrap();
     let query = "
         INSERT INTO journald (ts, priority, unit, pid, message)
         VALUES (?1, ?2, ?3, ?4, ?5);
     ";
-    conn.execute(query, rusqlite::params!(ts, priority, unit, pid, message)).unwrap();
+    conn.execute(query, rusqlite::params!(ts, priority, unit, pid, message))
+        .unwrap();
 
-    add_message("journald", conn.last_insert_rowid(), ts, "info", &format!("Journald event: {}", message));
+    add_message(
+        "journald",
+        conn.last_insert_rowid(),
+        ts,
+        "info",
+        &format!("Journald event: {}", message),
+    );
 }
-pub fn add_auditd_event(ts: i64, event_type: &str, pid: Option<i32>, uid: Option<i32>, executable: Option<&str>) {
-    use rusqlite::{Connection};
+pub fn add_auditd_event(
+    ts: i64,
+    event_type: &str,
+    pid: Option<i32>,
+    uid: Option<i32>,
+    executable: Option<&str>,
+) {
+    use rusqlite::Connection;
     let ts = convert_to_unix_timestamp(ts);
     let conn = Connection::open("db.sqlite").unwrap();
     let query = "
         INSERT INTO auditd (ts, event_type, pid, uid, executable)
         VALUES (?1, ?2, ?3, ?4, ?5);
     ";
-    conn.execute(query, rusqlite::params!(ts, event_type, pid, uid, executable)).unwrap();
+    conn.execute(
+        query,
+        rusqlite::params!(ts, event_type, pid, uid, executable),
+    )
+    .unwrap();
 
-    add_message("auditd", conn.last_insert_rowid(), ts, "info", &format!("Auditd event: {} for PID {:?}", event_type, pid));
+    add_message(
+        "auditd",
+        conn.last_insert_rowid(),
+        ts,
+        "info",
+        &format!("Auditd event: {} for PID {:?}", event_type, pid),
+    );
 }
 
 pub fn add_sysstat_event(ts: i64, cpu_pct: f64, mem_pct: f64, disk_io_kb: f64, load_avg: f64) {
-    use rusqlite::{Connection};
+    use rusqlite::Connection;
     let ts = convert_to_unix_timestamp(ts);
     let conn = Connection::open("db.sqlite").unwrap();
     let query = "
         INSERT INTO sysstat (ts, cpu_pct, mem_pct, disk_io_kb, load_avg)
         VALUES (?1, ?2, ?3, ?4, ?5);
     ";
-    conn.execute(query, rusqlite::params![ts, cpu_pct, mem_pct, disk_io_kb, load_avg]).unwrap();
+    conn.execute(
+        query,
+        rusqlite::params![ts, cpu_pct, mem_pct, disk_io_kb, load_avg],
+    )
+    .unwrap();
 
-    add_message("sysstat", conn.last_insert_rowid(), ts, "info", &format!("Sysstat event: CPU {}%, MEM {}%, Disk IO {} KB/s, Load Avg {}", cpu_pct, mem_pct, disk_io_kb, load_avg));
+    add_message(
+        "sysstat",
+        conn.last_insert_rowid(),
+        ts,
+        "info",
+        &format!(
+            "Sysstat event: CPU {}%, MEM {}%, Disk IO {} KB/s, Load Avg {}",
+            cpu_pct, mem_pct, disk_io_kb, load_avg
+        ),
+    );
 }
