@@ -1,1 +1,36 @@
+# build output
 /target
+
+# recorded data: process names, pids, log messages and audit events must never be published
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.db
+*.db-*
+
+# raw logs and crash dumps
+*.log
+*.log.*
+core
+core.*
+*.core
+
+# secrets and keys
+.env
+.env.*
+*.pem
+*.key
+*.p12
+id_rsa*
+id_ed25519*
+secrets*
+
+# local tool and editor settings
+.claude/
+.vscode/
+.idea/
+*.swp
+
+# python
+__pycache__/
+*.pyc

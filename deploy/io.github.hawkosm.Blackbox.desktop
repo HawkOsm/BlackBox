@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Blackbox
+GenericName=System Recorder
+Comment=Review crashes, logs and system health recorded by the blackbox collector
+Exec=python3 @HOME@/.local/share/blackbox/ui/blackbox_app.py
+Icon=io.github.hawkosm.Blackbox
+Terminal=false
+Categories=System;Monitor;
+StartupWMClass=io.github.hawkosm.Blackbox
+Keywords=logs;crash;monitor;diagnostics;

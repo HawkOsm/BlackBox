@@ -1,0 +1,14 @@
+# Blackbox audit rules: low volume, high value. Everything is tagged bb_* so the
+# collector can pick these records out of the audit log.
+
+# identity / privilege / auth configuration being changed
+-w /etc/passwd -p wa -k bb_identity
+-w /etc/shadow -p wa -k bb_identity
+-w /etc/group -p wa -k bb_identity
+-w /etc/sudoers -p wa -k bb_identity
+-w /etc/sudoers.d/ -p wa -k bb_identity
+-w /etc/pam.d/ -p wa -k bb_identity
+-w /etc/ssh/sshd_config -p wa -k bb_identity
+
+# kernel modules loaded or removed
+-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k bb_modules

@@ -1,0 +1,20 @@
+[Unit]
+Description=Blackbox system recorder
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/blackbox
+Environment=BLACKBOX_DB=%h/.local/share/blackbox/blackbox.db
+Environment=BLACKBOX_MAX_MB=7500
+ExecStart=%h/.local/bin/blackbox
+Restart=always
+RestartSec=5
+Nice=5
+UMask=0077
+NoNewPrivileges=yes
+CPUAccounting=yes
+MemoryAccounting=yes
+IOAccounting=yes
+
+[Install]
+WantedBy=default.target
