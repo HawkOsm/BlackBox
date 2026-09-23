@@ -134,6 +134,24 @@ pub fn attach_event_filter(sock: i32) -> Result<(), std::io::Error> {
     check_ret(ret as i64)
 }
 
+/// A read timeout for blocking reads; `None` blocks forever again.
+pub fn set_recv_timeout(sock: i32, timeout: Option<std::time::Duration>) {
+    let t = timeout.unwrap_or_default();
+    let tv = libc::timeval {
+        tv_sec: t.as_secs() as libc::time_t,
+        tv_usec: t.subsec_micros() as libc::suseconds_t,
+    };
+    unsafe {
+        libc::setsockopt(
+            sock,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            &tv as *const libc::timeval as *const libc::c_void,
+            mem::size_of::<libc::timeval>() as libc::socklen_t,
+        );
+    }
+}
+
 /// Best effort: the kernel clamps this to net.core.rmem_max.
 pub fn set_recv_buffer(sock: i32, bytes: i32) {
     unsafe {

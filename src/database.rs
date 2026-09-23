@@ -58,10 +58,36 @@ const SCHEMA: &str = "
         gpu_temp    REAL
     );
     CREATE INDEX IF NOT EXISTS idx_sysstat_ts ON sysstat(ts);
+
+    CREATE TABLE IF NOT EXISTS boot (
+        boot_id     INTEGER PRIMARY KEY,
+        ts          TEXT    NOT NULL,
+        kind        TEXT    NOT NULL,  -- 'start' | 'unclean_end'
+        kernel_boot TEXT    NOT NULL,  -- the kernel's boot id of the boot this row is about
+        kernel      TEXT,              -- kernel release, for 'start'
+        note        TEXT,              -- for 'unclean_end': the last thing that boot logged
+        UNIQUE (kernel_boot, kind)
+    );
+    CREATE INDEX IF NOT EXISTS idx_boot_ts ON boot(ts);
+
+    CREATE TABLE IF NOT EXISTS packages (
+        package_id  INTEGER PRIMARY KEY,
+        ts          TEXT    NOT NULL,
+        command     TEXT,              -- the pacman command line, when the log has it
+        changes     TEXT    NOT NULL   -- one line per package: 'upgraded linux (6.9-1 -> 6.10-1)'
+    );
+    CREATE INDEX IF NOT EXISTS idx_packages_ts ON packages(ts);
+
+    CREATE TABLE IF NOT EXISTS state (
+        key         TEXT PRIMARY KEY,  -- e.g. 'journald.cursor.warnings'
+        value       TEXT NOT NULL
+    );
 ";
 
 const TRIM_CHUNK: usize = 1000;
-const TIME_TABLES: [&str; 5] = ["messages", "custom", "journald", "auditd", "sysstat"];
+const TIME_TABLES: [&str; 7] = [
+    "messages", "custom", "journald", "auditd", "sysstat", "boot", "packages",
+];
 
 pub struct Sample {
     pub cpu_pct: f64,
@@ -122,6 +148,13 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, kind: &str) {
         conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))
             .unwrap();
     }
+}
+
+/// The inverse of `ts_text`.
+pub fn ts_epoch(ts: &str) -> Option<i64> {
+    chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|t| t.and_utc().timestamp())
 }
 
 pub fn ts_text(ts: i64) -> String {
@@ -235,22 +268,33 @@ fn journald_duplicate(ts: &str, unit: Option<&str>, message: &str) -> bool {
         .is_ok()
 }
 
-pub fn add_journald_event(
-    ts: i64,
-    priority: i32,
-    unit: Option<&str>,
-    pid: Option<i32>,
-    message: &str,
-) {
-    let ts = ts_text(ts);
-    if journald_duplicate(&ts, unit, message) {
+/// One journal entry to store.
+pub struct Journal<'a> {
+    pub ts: i64,
+    pub priority: i32,
+    pub unit: Option<&'a str>,
+    pub pid: Option<i32>,
+    pub message: &'a str,
+    /// Overrides the severity the priority implies (a panic logged at info is still a crash).
+    pub severity: Option<&'a str>,
+    /// Where the follower is in the journal, saved with the row so a restart resumes exactly.
+    pub cursor: Option<(&'a str, &'a str)>,
+    /// Skip it if an identical row exists: only needed where a time-based resume overlaps.
+    pub dedup: bool,
+}
+
+pub fn add_journald(j: &Journal) {
+    let ts = ts_text(j.ts);
+    if j.dedup && journald_duplicate(&ts, j.unit, j.message) {
         return;
     }
-    let severity = if priority <= 3 { "error" } else { "warning" };
+    let severity = j.severity.or_else(|| {
+        (j.priority <= 4).then_some(if j.priority <= 3 { "error" } else { "warning" })
+    });
     let summary = format!(
         "{}: {}",
-        unit.unwrap_or("system"),
-        message
+        j.unit.unwrap_or("system"),
+        j.message
             .lines()
             .next()
             .unwrap_or("")
@@ -258,11 +302,79 @@ pub fn add_journald_event(
             .take(200)
             .collect::<String>()
     );
-    let alert = (priority <= 4).then_some((severity, summary.as_str()));
-    record("journald", &ts, alert, |tx| {
+    record("journald", &ts, severity.map(|s| (s, summary.as_str())), |tx| {
+        // before the row itself: `record` takes the row's id from the last insert
+        if let Some((key, cursor)) = j.cursor {
+            upsert_state(tx, key, cursor)?;
+        }
         tx.execute(
             "INSERT INTO journald (ts, priority, unit, pid, message) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![ts, priority, unit, pid, message],
+            params![ts, j.priority, j.unit, j.pid, j.message],
+        )
+        .map(|_| ())
+    });
+}
+
+fn upsert_state(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO state (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )
+    .map(|_| ())
+}
+
+pub fn get_state(key: &str) -> Option<String> {
+    conn()
+        .query_row("SELECT value FROM state WHERE key = ?1", params![key], |r| r.get(0))
+        .ok()
+}
+
+pub fn set_state(key: &str, value: Option<&str>) {
+    let c = conn();
+    let result = match value {
+        Some(v) => upsert_state(&c, key, v),
+        None => c.execute("DELETE FROM state WHERE key = ?1", params![key]).map(|_| ()),
+    };
+    if let Err(e) = result {
+        eprintln!("db write failed (state): {e}");
+    }
+}
+
+pub fn boot_recorded(kernel_boot: &str, kind: &str) -> bool {
+    conn()
+        .query_row(
+            "SELECT 1 FROM boot WHERE kernel_boot = ?1 AND kind = ?2",
+            params![kernel_boot, kind],
+            |_| Ok(()),
+        )
+        .is_ok()
+}
+
+pub struct Boot<'a> {
+    pub ts: i64,
+    pub kind: &'a str,
+    pub kernel_boot: &'a str,
+    pub kernel: Option<&'a str>,
+    pub note: Option<&'a str>,
+}
+
+pub fn add_boot_event(b: &Boot, severity: &str, summary: &str) {
+    let ts = ts_text(b.ts);
+    record("boot", &ts, Some((severity, summary)), |tx| {
+        tx.execute(
+            "INSERT INTO boot (ts, kind, kernel_boot, kernel, note) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![ts, b.kind, b.kernel_boot, b.kernel, b.note],
+        )
+        .map(|_| ())
+    });
+}
+
+pub fn add_package_change(ts: i64, command: Option<&str>, changes: &str, summary: &str) {
+    let ts = ts_text(ts);
+    record("packages", &ts, Some(("info", summary)), |tx| {
+        tx.execute(
+            "INSERT INTO packages (ts, command, changes) VALUES (?1, ?2, ?3)",
+            params![ts, command, changes],
         )
         .map(|_| ())
     });
@@ -342,7 +454,10 @@ pub fn trim_to_budget(max_bytes: u64) -> usize {
             match (lo, hi) {
                 (Ok(Some(lo)), Ok(Some(hi))) => c
                     .query_row(
-                        "SELECT datetime(?1, '+' || max(60, (strftime('%s', ?2) - strftime('%s', ?1)) / 10) || ' seconds')",
+                        // the newest time is capped at now: one row stamped far in the future
+                        // (a clock that was once wrong) would otherwise stretch the span so far
+                        // that the first tenth swallows every real row
+                        "SELECT datetime(?1, '+' || max(60, (min(strftime('%s', ?2), strftime('%s', 'now')) - strftime('%s', ?1)) / 10) || ' seconds')",
                         params![lo, hi],
                         |r| r.get(0),
                     )
@@ -420,7 +535,24 @@ mod tests {
                 "x".repeat(100).as_str(),
             );
         }
-        add_journald_event(1_700_000_100, 3, Some("unit"), Some(5), "boom");
+        add_journald(&Journal {
+            ts: 1_700_000_100,
+            priority: 3,
+            unit: Some("unit"),
+            pid: Some(5),
+            message: "boom",
+            severity: None,
+            cursor: Some(("journald.cursor.test", "s=abc")),
+            dedup: false,
+        });
+        assert_eq!(get_state("journald.cursor.test").as_deref(), Some("s=abc"));
+        let journald_ref: i64 = conn()
+            .query_row("SELECT ref_id FROM messages WHERE source = 'journald'", [], |r| r.get(0))
+            .unwrap();
+        let journald_id: i64 = conn()
+            .query_row("SELECT journald_id FROM journald", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(journald_ref, journald_id, "the cursor write must not shift the row id");
         add_auditd_event(
             1_700_000_100,
             "USER_AUTH",
@@ -486,6 +618,26 @@ mod tests {
             summary,
             "bash (pid 4242) killed by SIGSEGV (11), core dumped"
         );
+
+        // one row stamped in the far future (a clock that was once wrong) must not make the trim
+        // throw away every real row
+        conn()
+            .execute_batch("DELETE FROM custom; DELETE FROM messages; DELETE FROM journald;")
+            .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        for i in 0..3000 {
+            add_custom_event(now - 3000 + i, 100, Some(1), 11, Some("test"), "error", &"x".repeat(100));
+        }
+        add_custom_event(4_102_444_800, 100, Some(1), 11, Some("future"), "error", "from 2100");
+        let before = logical_size_bytes();
+        trim_to_budget(before / 2);
+        let recent: i64 = conn()
+            .query_row("SELECT COUNT(*) FROM custom WHERE comm = 'test'", [], |r| r.get(0))
+            .unwrap();
+        assert!(recent > 1000, "trim kept only {recent} of 3000 recent rows");
 
         let _ = std::fs::remove_file(&path);
     }

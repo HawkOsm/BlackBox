@@ -13,8 +13,10 @@ second (see [docs/architecture.md](docs/architecture.md#performance)).
 |---|---|
 | Processes | A crash (SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGSEGV, SIGSYS), named and with its stack trace from systemd-coredump, and any exit with a failure status (not 0 or 1), such as a Rust panic |
 | System | CPU, memory, disk, load and NVIDIA GPU every 10 s (GPU every 30 s) |
-| journald | Warnings and worse, with backfill after a restart |
-| auditd | Failed logins and auth, sudo use, kernel module loads, edits to identity files, audit anomalies |
+| journald | Warnings and worse, plus Rust panics (logged at info level); after a restart it continues exactly where it stopped |
+| auditd | Failed logins and auth, sudo use, kernel module loads, edits to identity and boot files, audit anomalies; after a restart it picks up what it missed |
+| Changes | Every pacman transaction, with the kernel, driver and systemd upgrades listed first |
+| Boots | Every boot, and a previous boot that ended without a clean shutdown (a freeze, a kernel panic, a power loss), stored at the moment it stopped |
 
 Everything lives in one SQLite file capped at 7.5 GB, and the audit log adds up to 2 GB, so the whole
 thing stays within a 10 GB budget. When the database fills up, the oldest slice of time is dropped
@@ -47,6 +49,7 @@ Remove everything with `deploy/install.sh uninstall` (add `--purge` to delete th
   trace, and every other event in that window.
 - The clock button shows any moment you pick, even one where nothing was recorded.
 - The copy button puts a plain-text report of the selected moment on the clipboard.
+- Every event lists the package changes from the week before it.
 - The header shows whether the collector is alive.
 - Collector status: `systemctl --user status blackbox`
 - Collector log: `journalctl --user -u blackbox`
@@ -62,6 +65,7 @@ Environment variables, set in `deploy/blackbox.service` (or the installed copy i
 | `BLACKBOX_MAX_MB` | `7500` | database size cap |
 | `BLACKBOX_BATCH_MS` | `100` | how long process events are allowed to pile up before being handled |
 | `BLACKBOX_AUDIT_LOG` | `/var/log/audit/audit.log` | audit log to follow |
+| `BLACKBOX_PACMAN_LOG` | `/var/log/pacman.log` | pacman log to read |
 
 ## Privacy
 
@@ -73,6 +77,8 @@ keys and local tool settings.
 
 ```
 src/collector.rs   process exits and crashes from the kernel (netlink proc connector)
+src/boot.rs        each boot, and whether the previous one ended cleanly
+src/pacman.rs      package changes from /var/log/pacman.log
 src/exit.rs        which exits are kept, and how they are described
 src/socket.rs      raw netlink socket, kernel-side event filter
 src/netlink.rs     netlink and connector message layout

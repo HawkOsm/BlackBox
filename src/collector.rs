@@ -36,9 +36,6 @@ fn socket_handler() -> i32 {
         std::process::exit(1);
     }
     socket::set_recv_buffer(sock, 1 << 20);
-    if let Err(e) = socket::attach_event_filter(sock) {
-        eprintln!("kernel event filter unavailable, filtering in userspace instead: {e}");
-    }
     sock
 }
 
@@ -55,7 +52,36 @@ fn netlink_handler(socket: i32) {
         eprintln!("Failed to send listen message: {e}");
         std::process::exit(1);
     }
-    println!("Listening for process events... {msg:?}");
+    confirm_subscription(socket);
+    // only now: the filter would drop the kernel's reply above
+    if let Err(e) = socket::attach_event_filter(socket) {
+        eprintln!("kernel event filter unavailable, filtering in userspace instead: {e}");
+    }
+}
+
+/// The kernel answers a subscription with an event of kind "none" carrying an error code. A
+/// refusal would otherwise look exactly like a quiet machine: no crashes, ever.
+fn confirm_subscription(socket: i32) {
+    let mut buffer = vec![0u8; 4096];
+    socket::set_recv_timeout(socket, Some(std::time::Duration::from_secs(2)));
+    let answer = (0..64).find_map(|_| match socket::read_message(socket, &mut buffer) {
+        Ok(n) if n >= 56 && u32::from_ne_bytes(buffer[36..40].try_into().unwrap()) == 0 => {
+            Some(Ok(u32::from_ne_bytes(buffer[52..56].try_into().unwrap())))
+        }
+        Ok(_) => None, // an event that raced ahead of the reply
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => None,
+        Err(e) => Some(Err(e)),
+    });
+    socket::set_recv_timeout(socket, None);
+    match answer {
+        Some(Ok(0)) => println!("subscribed to kernel process events"),
+        Some(Ok(err)) => eprintln!(
+            "the kernel refused the process-event subscription: {}; crashes will not be recorded",
+            std::io::Error::from_raw_os_error(err as i32)
+        ),
+        Some(Err(e)) => eprintln!("no answer to the process-event subscription ({e}); crashes may not be recorded"),
+        None => eprintln!("no answer to the process-event subscription; crashes may not be recorded"),
+    }
 }
 
 fn handle_bytes(names: &mut HashMap<u32, String>, bytes: &[u8]) {

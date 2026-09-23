@@ -6,7 +6,14 @@ import time
 from pathlib import Path
 
 FMT = "%Y-%m-%d %H:%M:%S"
-TABLES = {"custom": "custom_id", "journald": "journald_id", "auditd": "audit_id", "sysstat": "sysstat_id"}
+TABLES = {
+    "custom": "custom_id",
+    "journald": "journald_id",
+    "auditd": "audit_id",
+    "sysstat": "sysstat_id",
+    "boot": "boot_id",
+    "packages": "package_id",
+}
 SPAN = "ts BETWEEN datetime(?, ?) AND datetime(?, ?)"
 
 
@@ -91,6 +98,15 @@ class Data:
             return {}
         found = self.rows(f"SELECT * FROM {source} WHERE {TABLES[source]} = ?", (ref_id,))
         return found[0] if found else {}
+
+    def changes_before(self, ts, days=7, limit=5):
+        """Package transactions in the days before a moment: what changed before it broke."""
+        found = self.rows(
+            "SELECT source, ref_id, ts, severity, summary FROM messages WHERE source = 'packages' "
+            "AND ts BETWEEN datetime(?, ?) AND ? ORDER BY ts DESC",
+            (ts, f"-{days} days", ts),
+        )
+        return found[:limit], len(found)
 
     def coredump(self, pid, ts):
         """systemd-coredump's journal entry for a crash, which carries the stack trace."""

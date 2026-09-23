@@ -1,4 +1,4 @@
-use crate::database;
+use crate::database::{self, Journal};
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -10,6 +10,7 @@ pub struct Entry {
     pub unit: Option<String>,
     pub pid: Option<i32>,
     pub message: String,
+    pub cursor: Option<String>,
     pub coredump: Option<Coredump>,
 }
 
@@ -20,7 +21,7 @@ pub struct Coredump {
     pub exe: Option<String>,
 }
 
-fn text(v: &Value) -> Option<String> {
+pub fn text(v: &Value) -> Option<String> {
     match v {
         Value::String(s) => Some(s.clone()),
         // journald encodes non-UTF-8 messages as an array of bytes
@@ -58,60 +59,130 @@ pub fn parse_line(line: &str) -> Option<Entry> {
         priority,
         unit,
         pid,
-        message,
+        message: strip_ansi(&message),
+        cursor: v.get("__CURSOR").and_then(text),
         coredump,
     })
 }
 
+/// Drops terminal colour codes (`ESC [ ... m` and friends), which some services log verbatim.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            // parameter and intermediate bytes, then one final byte from '@' to '~'
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Messages that look alarming but are routine here: stored, but not raised as problems.
+const ROUTINE: [&str; 1] = [
+    // the kernel prints this at every shutdown, when systemd hands the hardware watchdog back
+    "watchdog did not stop!",
+];
+
+#[derive(Clone, Copy)]
+struct Follower {
+    name: &'static str,
+    filter: &'static [&'static str],
+    severity: Option<&'static str>,
+}
+
+const FOLLOWERS: [Follower; 2] = [
+    Follower {
+        name: "warnings",
+        filter: &["--priority=warning"],
+        severity: None,
+    },
+    // Rust panics are logged at info or notice, below the warning filter, but they are crashes.
+    Follower {
+        name: "panics",
+        filter: &["--priority=notice..info", "--grep=panicked at"],
+        severity: Some("error"),
+    },
+];
+
 pub fn start() {
-    std::thread::spawn(|| {
-        loop {
-            // resume from the last stored entry so a restart doesn't lose the events around a crash
-            let since = match database::last_ts("journald") {
-                Some(ts) => format!("--since={ts} UTC"),
-                None => "--lines=0".to_string(),
-            };
-            let child = Command::new("journalctl")
-                .args([
-                    "--follow",
-                    "--output=json",
-                    "--priority=warning",
-                    "--no-pager",
-                    &since,
-                ])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn();
-            match child {
-                Ok(mut child) => {
-                    if let Some(out) = child.stdout.take() {
-                        for line in BufReader::new(out).lines().map_while(Result::ok) {
-                            if let Some(e) = parse_line(&line) {
-                                database::add_journald_event(
-                                    e.ts,
-                                    e.priority,
-                                    e.unit.as_deref(),
-                                    e.pid,
-                                    &e.message,
-                                );
-                                if let Some(c) = &e.coredump {
-                                    database::name_crash(
-                                        e.ts,
-                                        c.pid,
-                                        c.comm.as_deref(),
-                                        c.exe.as_deref(),
-                                    );
-                                }
-                            }
+    for f in FOLLOWERS {
+        std::thread::spawn(move || follow(f));
+    }
+}
+
+fn follow(f: Follower) {
+    let key = format!("journald.cursor.{}", f.name);
+    loop {
+        // Resume exactly after the last stored entry. Without a saved cursor (first run), resume
+        // by time: the overlapping second may hold entries already stored, so only those are
+        // checked for duplicates. Identical messages later on are real repeats and are kept.
+        let cursor = database::get_state(&key);
+        let since = database::last_ts("journald");
+        let overlap_until = since.as_deref().and_then(database::ts_epoch);
+        let resume = match (&cursor, &since) {
+            (Some(c), _) => format!("--after-cursor={c}"),
+            (None, Some(ts)) => format!("--since={ts} UTC"),
+            (None, None) => "--lines=0".to_string(),
+        };
+        let mut args = vec!["--follow", "--output=json", "--no-pager"];
+        args.extend_from_slice(f.filter);
+        args.push(&resume);
+        let mut lines = 0;
+        match Command::new("journalctl")
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                if let Some(out) = child.stdout.take() {
+                    for line in BufReader::new(out).lines().map_while(Result::ok) {
+                        lines += 1;
+                        if let Some(e) = parse_line(&line) {
+                            let dedup = cursor.is_none() && overlap_until.is_some_and(|t| e.ts <= t);
+                            store(&e, f, &key, dedup);
                         }
                     }
-                    let _ = child.wait();
                 }
-                Err(e) => eprintln!("journalctl unavailable: {e}"),
+                let _ = child.wait();
             }
-            std::thread::sleep(Duration::from_secs(5));
+            Err(e) => eprintln!("journalctl unavailable: {e}"),
         }
+        // A following journalctl only ends by itself when it cannot use the cursor (the journal
+        // was vacuumed past it): forget it and resume by time instead.
+        if cursor.is_some() && lines == 0 {
+            eprintln!("journald: saved position is gone, resuming by time");
+            database::set_state(&key, None);
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    }
+}
+
+fn store(e: &Entry, f: Follower, key: &str, dedup: bool) {
+    let routine = ROUTINE.iter().any(|r| e.message.contains(r));
+    database::add_journald(&Journal {
+        ts: e.ts,
+        priority: e.priority,
+        unit: e.unit.as_deref(),
+        pid: e.pid,
+        message: &e.message,
+        severity: f.severity.or(routine.then_some("info")),
+        cursor: e.cursor.as_deref().map(|c| (key, c)),
+        dedup,
     });
+    if let Some(c) = &e.coredump {
+        database::name_crash(e.ts, c.pid, c.comm.as_deref(), c.exe.as_deref());
+    }
 }
 
 #[cfg(test)]
@@ -151,6 +222,22 @@ mod tests {
                 .coredump
                 .is_none()
         );
+    }
+
+    #[test]
+    fn strips_colour_codes_and_keeps_the_cursor() {
+        // how warp-svc logs a panic: bytes, with colour codes
+        let msg: Vec<String> = "\x1b[2m2026\x1b[0m \x1b[31mERROR\x1b[0m thread 'main' panicked at src/x.rs:1:2"
+            .bytes()
+            .map(|b| b.to_string())
+            .collect();
+        let line = format!(
+            r#"{{"__REALTIME_TIMESTAMP":"1000000","__CURSOR":"s=1;i=2","PRIORITY":"6","MESSAGE":[{}]}}"#,
+            msg.join(",")
+        );
+        let e = parse_line(&line).unwrap();
+        assert_eq!(e.message, "2026 ERROR thread 'main' panicked at src/x.rs:1:2");
+        assert_eq!(e.cursor.as_deref(), Some("s=1;i=2"));
     }
 
     #[test]

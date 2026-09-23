@@ -1,5 +1,5 @@
 use crate::database;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -30,13 +30,7 @@ fn field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
 /// anomalies (crashes, promiscuous mode), MAC denials, and hits on our own `bb_*` rules.
 pub fn parse_line(line: &str) -> Option<AuditEvent> {
     let kind = line.strip_prefix("type=")?.split_whitespace().next()?;
-    let ts: i64 = line
-        .split("audit(")
-        .nth(1)?
-        .split('.')
-        .next()?
-        .parse()
-        .ok()?;
+    let ts = line_ts(line)?;
     let pid = field(line, "pid").and_then(|v| v.parse().ok());
     let uid = field(line, "uid").and_then(|v| v.parse().ok());
     let key = field(line, "key");
@@ -79,6 +73,46 @@ pub fn parse_line(line: &str) -> Option<AuditEvent> {
     })
 }
 
+fn line_ts(line: &str) -> Option<i64> {
+    line.split("audit(").nth(1)?.split('.').next()?.parse().ok()
+}
+
+/// The first line that starts at or after byte `pos`, with its start and timestamp.
+fn line_at(file: &mut std::fs::File, pos: u64) -> Option<(u64, i64)> {
+    let mut start = pos;
+    let mut buf = vec![0u8; 16 * 1024];
+    if pos > 0 {
+        // the line containing pos - 1 is cut: skip past its newline
+        file.seek(SeekFrom::Start(pos - 1)).ok()?;
+        let n = file.read(&mut buf).ok()?;
+        start = pos - 1 + buf[..n].iter().position(|&b| b == b'\n')? as u64 + 1;
+    }
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let n = file.read(&mut buf).ok()?;
+    let end = buf[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
+    let ts = line_ts(&String::from_utf8_lossy(&buf[..end]))?;
+    Some((start, ts))
+}
+
+/// Byte offset of the first record newer than `after`, found by binary search (the log is in
+/// time order), so a restart picks up what happened while the collector was down without
+/// reading the whole file. Records in rotated-away files are not recovered.
+pub fn resume_offset(path: &str, after: i64) -> u64 {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return 0;
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let (mut lo, mut hi) = (0u64, len);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        match line_at(&mut file, mid) {
+            Some((_, ts)) if ts <= after => lo = mid + 1,
+            _ => hi = mid,
+        }
+    }
+    line_at(&mut file, lo).map_or(len, |(start, _)| start)
+}
+
 pub fn start() {
     std::thread::spawn(|| {
         loop {
@@ -88,8 +122,13 @@ pub fn start() {
                 std::thread::sleep(Duration::from_secs(30));
                 continue;
             }
+            // resume after the newest stored record; the first time, start at the end
+            let from = match database::last_ts("auditd").as_deref().and_then(database::ts_epoch) {
+                Some(after) => format!("+{}", resume_offset(&path, after) + 1),
+                None => format!("+{}", std::fs::metadata(&path).map_or(0, |m| m.len()) + 1),
+            };
             let child = Command::new("tail")
-                .args(["-n", "0", "-F", &path])
+                .args(["-c", &from, "-F", &path])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn();
@@ -168,6 +207,22 @@ mod tests {
             .is_none()
         );
         assert!(parse_line("garbage").is_none());
+    }
+
+    #[test]
+    fn resumes_after_the_last_stored_record() {
+        let path = std::env::temp_dir().join(format!("bb_audit_{}.log", std::process::id()));
+        let lines: Vec<String> = (0..500)
+            .map(|i| format!("type=SYSCALL msg=audit({}.000:{i}): pid=1 {}\n", 1000 + i / 2, "x".repeat(i % 97)))
+            .collect();
+        std::fs::write(&path, lines.concat()).unwrap();
+        let p = path.to_str().unwrap();
+        let offset_of = |i: usize| lines[..i].iter().map(|l| l.len() as u64).sum::<u64>();
+        assert_eq!(resume_offset(p, 999), 0, "nothing stored yet in this range: from the top");
+        assert_eq!(resume_offset(p, 1000), offset_of(2), "past both lines of second 1000");
+        assert_eq!(resume_offset(p, 1123), offset_of(248));
+        assert_eq!(resume_offset(p, 5000), offset_of(500), "all stored: from the end");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -12,7 +12,6 @@ RestartSec=5
 Nice=5
 UMask=0077
 NoNewPrivileges=yes
-CPUAccounting=yes
 MemoryAccounting=yes
 IOAccounting=yes
 

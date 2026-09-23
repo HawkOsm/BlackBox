@@ -1,8 +1,10 @@
 mod auditd;
+mod boot;
 mod collector;
 mod database;
 mod exit;
 mod journald;
+mod pacman;
 mod sampler;
 
 fn main() {
@@ -15,5 +17,7 @@ fn main() {
     sampler::start();
     journald::start();
     auditd::start();
+    pacman::start();
+    boot::start();
     collector::build_collector();
 }

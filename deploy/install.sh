@@ -25,6 +25,8 @@ install)
     sed "s|@HOME@|$HOME|g" "$REPO/deploy/io.github.hawkosm.Blackbox.desktop" > "$APPS/io.github.hawkosm.Blackbox.desktop"
     command -v update-desktop-database >/dev/null && update-desktop-database "$APPS" || true
     command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+    # keep the user service running from boot, and after logging out
+    loginctl enable-linger "$USER" 2>/dev/null || echo "note: could not enable lingering; the collector will only run while you are logged in"
     systemctl --user daemon-reload
     systemctl --user enable blackbox.service
     systemctl --user restart blackbox.service

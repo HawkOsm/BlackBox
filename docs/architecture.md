@@ -5,15 +5,17 @@
 ```
  kernel proc events ──(BPF filter)──► collector ─┐
  /proc, nvidia-smi ──────────────────► sampler ──┤
- journalctl --follow (warning+) ─────► journald ─┼──► database.rs ──► blackbox.db ◄── Blackbox app
- tail -F /var/log/audit/audit.log ───► auditd ───┘   (one connection,   (SQLite,       (read only,
-                                                      WAL, one          7.5 GB ring)    only while open)
-                                                      transaction per
+ journalctl --follow (warning+) ─────► journald ─┤
+ journalctl --follow (panics) ───────► journald ─┼──► database.rs ──► blackbox.db ◄── Blackbox app
+ tail -F /var/log/audit/audit.log ───► auditd ───┤   (one connection,   (SQLite,       (read only,
+ /var/log/pacman.log (every 30 s) ───► pacman ───┤    WAL, one          7.5 GB ring)    only while open)
+ previous boot's last journal entry ─► boot ─────┘    transaction per
                                                       event)
 ```
 
-One process (`blackbox`, a systemd user service) runs five threads: the collector on the main
-thread, plus sampler, journald follower, auditd follower and the trim job. The viewer is a separate
+One process (`blackbox`, a systemd user service) runs the collector on the main thread, plus
+threads for the sampler, two journald followers, the auditd follower, the pacman reader, the trim
+job, and a one-off boot check at startup. The viewer is a separate
 GTK app that opens the database read-only and never talks to the service.
 
 ## Components
@@ -54,7 +56,8 @@ events.
 Reads `/proc/stat`, `/proc/meminfo`, `/proc/loadavg` and `/proc/diskstats` every 10 s. The
 `sysstat` package is not used. The same numbers come from `/proc` with no dependency. GPU data
 comes from `nvidia-smi` every 30 s, and is skipped while the card is runtime-suspended so it never
-wakes the GPU. A `messages` row is written only when a threshold is crossed:
+wakes the GPU. `nvidia-smi` gets 5 s to answer and is killed after that, so a hung driver cannot
+stall the sampler. A `messages` row is written only when a threshold is crossed:
 
 | Metric | Warning | Error |
 |---|---|---|
@@ -66,11 +69,23 @@ wakes the GPU. A `messages` row is written only when a threshold is crossed:
 
 ### journald (`journald.rs`)
 
-Runs `journalctl --follow --output=json --priority=warning`. Priority 0 to 3 is stored as `error`,
-priority 4 as `warning`. On restart it resumes from the newest stored timestamp (with duplicate
-detection), so events around a crash that also restarted the service are not lost. systemd-coredump
-entries also name the matching crash in `custom` (see Process names above), and the viewer shows
-their stack trace next to the crash.
+Two `journalctl --follow --output=json` processes:
+
+| Follower | Filter | Stored as |
+|---|---|---|
+| warnings | `--priority=warning` | priority 0 to 3 `error`, 4 `warning` |
+| panics | `--priority=notice..info --grep='panicked at'` | `error`: Rust panics are logged at info level, below the warning filter |
+
+- **Exact resume.** Each stored entry saves its journal cursor in the `state` table, in the same
+  transaction as the row, and a restart continues with `--after-cursor`. Without a cursor (the first
+  run) it resumes by time, and only the overlapping second is checked for duplicates, so identical
+  messages logged in the same second are kept as the real repeats they are. If journald has vacuumed
+  past the saved cursor, the follower forgets it and resumes by time.
+- **Clean text.** Terminal colour codes that some services log verbatim are stripped.
+- **Routine noise.** A short list of messages that look alarming but are routine here (the kernel's
+  "watchdog did not stop!" at every shutdown) is stored as `info` instead of an alert.
+- systemd-coredump entries also name the matching crash in `custom` (see Process names above), and
+  the viewer shows their stack trace next to the crash.
 
 ### auditd (`auditd.rs`)
 
@@ -83,8 +98,32 @@ Follows the audit log with `tail -F` and keeps only low-volume, high-value recor
 | `SYSCALL` with a `bb_*` key (`deploy/blackbox.rules`) | warning |
 | `ANOM_*` (crashes, promiscuous mode) and `AVC` denials | error |
 
-If the log is missing or unreadable it checks again every 30 s. `deploy/setup-auditd.sh` installs the
+On restart it binary-searches the log for the first record newer than the last one stored and
+follows from there, so events during downtime are picked up without reading the whole file (records
+that rotated into `audit.log.1` meanwhile are not). If the log is missing or unreadable it checks
+again every 30 s. `deploy/setup-auditd.sh` installs the
 rules, caps the log at 4 x 500 MB and makes it readable by group `wheel`.
+
+### Package changes (`pacman.rs`)
+
+Reads `/var/log/pacman.log` and stores one row per transaction: the pacman command, every package
+changed, and a one-line summary with the packages that most often break a machine (kernel, NVIDIA,
+Mesa, systemd, glibc, mkinitcpio, GRUB, microcode, firmware) listed first, with their versions:
+`pacman: upgraded 83, installed 1 · mesa 1:26.2.2-1 → 1:26.2.3-1, linux 7.2.4.arch1-2 → 7.2.6.arch2-1, …`.
+The log only changes while pacman runs, so it is checked every 30 s by size instead of being
+followed by a process. The first run imports the whole log (139 transactions on this machine).
+The viewer lists the transactions from the week before any event it shows.
+
+### Boots (`boot.rs`)
+
+A freeze, a kernel panic or a power loss kills the collector with everything else, so nothing
+records it at the time. Once per boot, at startup, the collector records that the system started
+(with the kernel release), and reads the previous boot's last journal entry. A clean shutdown always
+ends with journald's "Journal stopped" (`MESSAGE_ID` `d93fb3c9c24d451a97cea615ce59c00b`); anything
+else is stored as an `error` at the moment the previous boot stopped, so the viewer shows the minutes
+before it. A last entry from suspend ("Filesystems sync", "PM: suspend") is described as a suspend
+that never resumed. On this machine 66 of 73 earlier boots ended cleanly; of the other 7, two stopped
+while suspending.
 
 ### Database (`database.rs`)
 
@@ -95,7 +134,9 @@ rules, caps the log at 4 x 500 MB and makes it readable by group `wheel`.
   Steady-state writes are about one every 10 s, so the extra fsync is negligible.
 - **Ring buffer.** Every 5 minutes the trim job measures the data actually in use (pages minus free
   pages). Over the budget, it deletes the oldest tenth of the time span from every table together,
-  repeating until usage is under 90% of the budget. Freed pages are reused, so the file plateaus
+  repeating until usage is under 90% of the budget. The newest time is capped at now: without that,
+  one row stamped in the far future (a clock that was once wrong) stretched the span so much that
+  the first pass deleted every real row (the test reproduces it: 0 of 3,000 recent rows kept). Freed pages are reused, so the file plateaus
   instead of growing.
 - **Trimming must not block writers.** The delete runs in chunks of 1,000 rows with the lock released
   between chunks, and the oldest/newest timestamp lookups use one `MIN` or `MAX` per subquery (SQLite
@@ -106,6 +147,7 @@ rules, caps the log at 4 x 500 MB and makes it readable by group `wheel`.
   location, `/tmp`, is a tmpfs where fsync costs nothing; run it with `TMPDIR` on a real disk to see
   the cost of `synchronous=FULL`. On this machine's NVMe (ext4), 1.2 M rows trimmed in 8.7 s instead
   of 7.4 s with NORMAL, and the worst concurrent write stayed at 7.4 ms (8.6 ms with NORMAL).
+- `state` holds small key-value settings the service keeps between runs (the journal cursors).
 - Timestamps are UTC text (`YYYY-MM-DD HH:MM:SS`). They sort correctly, and every `ts` column is
   indexed.
 
@@ -161,6 +203,8 @@ the application, not by a foreign key, because a foreign key cannot target sever
 | No summary or roll-up table | An hourly exec and exit count catches almost nothing that load, auditd and journald do not. |
 | Own `/proc` sampler | Avoids a package and a second data format for the same numbers. |
 | Native GTK app, not a web page | It should exist only while open, with no server or browser. |
+| pacman log read every 30 s, not followed | It changes only while pacman runs. A size check costs nothing; a `tail` process would sit there all day. |
+| Unclean shutdowns detected at the next boot | Nothing can record a freeze at the time it happens. The journal's last entry, read once per boot, is enough to tell. |
 
 ## Reading an exit code
 
@@ -206,9 +250,11 @@ one core more).
 
 ## Known gaps
 
-- The auditd source is unit-tested against realistic records but has not been run against a live
-  auditd. Run `deploy/setup-auditd.sh` to enable it. Audit events that happen while the service is
-  restarting are missed (journald events are backfilled).
+- auditd must be set up once with `sudo bash deploy/setup-auditd.sh`. Checked live: all 16 rules
+  load, and a denied write to `/etc/fstab` is stored as a `bb_boot` warning within 2 s. auditctl
+  prints "Old style watch rules are slower" for each `-w` rule; that is a deprecation notice, not an
+  error. After downtime the follower resumes from the current log only: records that rotated into
+  `audit.log.1` while the service was stopped are missed.
 - A failure that exits with status 1 is not recorded: it is indistinguishable from the polling
   helpers that return 1 for "not found" hundreds of times a minute.
 - Very short-lived processes that fail without dumping core usually have no name, only their
@@ -217,9 +263,11 @@ one core more).
 
 ## Tests
 
-`cargo test` covers the journald and audit parsers (including the coredump fields), the exit rule,
-the kernel filter against it for every wait status, naming a crash from its coredump entry, the
-database write path and the ring-buffer trim.
+`cargo test` covers the journald and audit parsers (including the coredump fields, cursors and
+colour codes), the exit rule, the kernel filter against it for every wait status, naming a crash
+from its coredump entry, the pacman parser, clean and unclean boot endings, resuming the audit log
+after downtime, the journal cursor not shifting row ids, the database write path, and the ring-buffer
+trim, including one far-future row (without the cap, that test keeps 0 of 3,000 recent rows).
 Beyond that, the whole service was exercised against a throwaway database: a real crash, a real
 journald warning, fake audit lines, a CPU burn, a restart with backfill, and a copy of an older
 database to test the schema migration.

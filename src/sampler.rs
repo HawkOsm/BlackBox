@@ -1,4 +1,5 @@
 use crate::database::{self, Sample};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const INTERVAL_SECS: u64 = 10;
@@ -86,18 +87,37 @@ fn nvidia_asleep() -> bool {
     false
 }
 
+/// Runs a command but gives up, killing it, after `limit`: a hung driver must not stall the sampler.
+fn output_within(cmd: &mut Command, limit: Duration) -> Option<std::process::Output> {
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            // the output is a few bytes, so it fits in the pipe while we wait
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) if started.elapsed() < limit => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!("sampler: nvidia-smi did not answer within {limit:?}, skipped");
+                return None;
+            }
+        }
+    }
+}
+
 /// (gpu %, vram %, temp C) from nvidia-smi; None when absent, failing, or the card is asleep.
 fn read_gpu() -> Option<(f64, f64, f64)> {
     if nvidia_asleep() {
         return None;
     }
-    let out = std::process::Command::new("nvidia-smi")
-        .args([
+    let out = output_within(
+        Command::new("nvidia-smi").args([
             "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
             "--format=csv,noheader,nounits",
-        ])
-        .output()
-        .ok()?;
+        ]),
+        Duration::from_secs(5),
+    )?;
     if !out.status.success() {
         return None;
     }

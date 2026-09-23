@@ -12,3 +12,15 @@
 
 # kernel modules loaded or removed
 -a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k bb_modules
+# the same through the 32-bit syscall table, which would otherwise be a way around the rule above
+-a always,exit -F arch=b32 -S init_module,finit_module,delete_module -k bb_modules
+
+# boot and system configuration: the edits that stop a machine from booting. The kernel images in
+# /boot are left out on purpose: every upgrade rewrites them, and the pacman source records upgrades.
+-w /etc/fstab -p wa -k bb_boot
+-w /etc/mkinitcpio.conf -p wa -k bb_boot
+-w /etc/mkinitcpio.d/ -p wa -k bb_boot
+-w /etc/modprobe.d/ -p wa -k bb_boot
+-w /etc/default/grub -p wa -k bb_boot
+-w /boot/loader/ -p wa -k bb_boot
+-w /etc/systemd/ -p wa -k bb_boot

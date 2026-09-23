@@ -21,7 +21,14 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango, PangoCairo  
 import data  # noqa: E402
 
 APP_ID = "io.github.hawkosm.Blackbox"
-SOURCES = [("custom", "Processes"), ("journald", "Journal"), ("auditd", "Audit"), ("sysstat", "System")]
+SOURCES = [
+    ("custom", "Processes"),
+    ("journald", "Journal"),
+    ("auditd", "Audit"),
+    ("sysstat", "System"),
+    ("boot", "Boots"),
+    ("packages", "Changes"),
+]
 LABEL = dict(SOURCES)
 SCOPES = [
     ("problems", "Problems", {"error", "warning"}),
@@ -61,7 +68,13 @@ FIELDS = {
     "gpu_pct": "GPU",
     "gpu_mem_pct": "GPU memory",
     "gpu_temp": "GPU temperature",
+    "kind": "What happened",
+    "kernel": "Kernel",
+    "kernel_boot": "Boot ID",
+    "note": "Last thing it logged",
+    "command": "Command",
 }
+KINDS = {"start": "The system started", "unclean_end": "The system stopped without a clean shutdown"}
 SIGNALS = {1: "SIGHUP", 2: "SIGINT", 3: "SIGQUIT", 4: "SIGILL", 5: "SIGTRAP", 6: "SIGABRT", 7: "SIGBUS",
            8: "SIGFPE", 9: "SIGKILL", 11: "SIGSEGV", 13: "SIGPIPE", 15: "SIGTERM", 31: "SIGSYS"}
 PRIORITIES = ["emergency", "alert", "critical", "error", "warning", "notice", "info", "debug"]
@@ -126,7 +139,13 @@ def day_label(ts):
 def offset(seconds):
     sign = "+" if seconds > 0 else "−" if seconds < 0 else "±"
     s = abs(int(seconds))
-    return f"{sign}{s} s" if s < 90 else f"{sign}{round(s / 60)} min"
+    if s < 90:
+        return f"{sign}{s} s"
+    if s < 90 * 60:
+        return f"{sign}{round(s / 60)} min"
+    if s < 36 * 3600:
+        return f"{sign}{round(s / 3600)} h"
+    return f"{sign}{round(s / 86400)} days"
 
 
 def describe_exit(code):
@@ -152,6 +171,8 @@ def field_value(key, value):
         return f"{value:.0f} KB/s"
     if key == "load_avg":
         return f"{value:.2f}"
+    if key == "kind":
+        return KINDS.get(value, value)
     return str(value)
 
 
@@ -752,13 +773,38 @@ class Window(Adw.ApplicationWindow):
         if detail:
             group = Adw.PreferencesGroup(title="Details")
             for key, value in detail.items():
-                if key.endswith("_id") or key == "ts":
+                if key.endswith("_id") or key in ("ts", "changes"):
                     continue
                 row = Adw.ActionRow(title=FIELDS.get(key, key.replace("_", " ").capitalize()), subtitle=field_value(key, value),
                                     use_markup=False, css_classes=["property"])
                 row.set_subtitle_selectable(True)
                 group.add(row)
             box.append(group)
+
+        if detail.get("changes"):
+            lines = detail["changes"].splitlines()
+            group = Adw.PreferencesGroup(title=f"Packages ({len(lines)})")
+            expander = Gtk.Expander(label="Every package in this transaction", expanded=len(lines) <= 12)
+            expander.set_child(Gtk.Label(label=detail["changes"], xalign=0, wrap=True, wrap_mode=Pango.WrapMode.CHAR,
+                                         selectable=True, css_classes=["mono"], margin_top=6))
+            card = Gtk.Box(css_classes=["card", "chart-card"])
+            card.append(expander)
+            group.add(card)
+            box.append(group)
+
+        if m.get("source") != "packages":
+            changes, total = self.db.changes_before(m["ts"])
+            if changes:
+                more = f", newest {len(changes)} shown" if total > len(changes) else ""
+                group = Adw.PreferencesGroup(title="Changed in the week before",
+                                             description=f"{total} package transactions{more}")
+                for c in changes:
+                    row = Adw.ActionRow(title=c["summary"], subtitle=f"{offset(data.epoch(c['ts']) - t)} · {local(c['ts'], '%a %d %b, %H:%M')}",
+                                        use_markup=False, activatable=True, title_lines=2)
+                    row.add_suffix(Gtk.Image(icon_name="go-next-symbolic", css_classes=["dim-label"]))
+                    row.connect("activated", lambda _r, e=c: self.show_detail(e))
+                    group.add(row)
+                box.append(group)
 
         label = next(lbl for _, lbl, s in WINDOWS if s == self.window_secs)
         around = Adw.PreferencesGroup(title="Around this moment", description=f"{len(ctx['messages'])} events within {label}")
