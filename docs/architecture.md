@@ -81,7 +81,8 @@ Two `journalctl --follow --output=json` processes:
   run) it resumes by time, and only the overlapping second is checked for duplicates, so identical
   messages logged in the same second are kept as the real repeats they are. If journald has vacuumed
   past the saved cursor, the follower forgets it and resumes by time.
-- **Clean text.** Terminal colour codes that some services log verbatim are stripped.
+- **Clean text.** Terminal colour codes that some services log verbatim are stripped, and empty
+  messages (the kernel logs bare continuation lines at error priority) are skipped.
 - **Routine noise.** A short list of messages that look alarming but are routine here (the kernel's
   "watchdog did not stop!" at every shutdown) is stored as `info` instead of an alert.
 - systemd-coredump entries also name the matching crash in `custom` (see Process names above), and
@@ -95,7 +96,7 @@ Follows the audit log with `tail -F` and keeps only low-volume, high-value recor
 |---|---|
 | `USER_AUTH`, `USER_LOGIN`, `USER_ACCT` with `res=failed` | warning |
 | successful `USER_AUTH`, `USER_LOGIN`, `USER_CMD` (sudo) | row in `auditd`, no alert |
-| `SYSCALL` with a `bb_*` key (`deploy/blackbox.rules`) | warning |
+| `SYSCALL` with a `bb_*` key (`deploy/blackbox.rules`) | warning; module loads in the first 3 minutes after boot are `info` (about 30 per boot, the kernel bringing up drivers) |
 | `ANOM_*` (crashes, promiscuous mode) and `AVC` denials | error |
 
 On restart it binary-searches the log for the first record newer than the last one stored and
@@ -125,8 +126,15 @@ before it. A last entry from suspend ("Filesystems sync", "PM: suspend") is desc
 that never resumed. On this machine 66 of 73 earlier boots ended cleanly; of the other 7, two stopped
 while suspending.
 
-### Database (`database.rs`)
+After a clean shutdown, errors and warnings from its last 30 s are relabelled `info` with
+"(during shutdown)": they are programs being killed as the session is torn down (on 2026-09-24 Hyprland
+and Spotify both aborted during a poweroff), not failures. This runs at every start and is idempotent.
 
+### Database (`database.rs`, `store.rs`)
+
+- **Sources never call it directly.** They hold an `Arc<dyn Store>` (`store.rs`), and
+  `database::LocalStore` implements it. That keeps SQL in one file and is the seam for moving the
+  store into its own process ([microservices.md](microservices.md)).
 - One shared connection, WAL mode, `synchronous=FULL`. Each event is one transaction that writes
   the source row and its `messages` row together. FULL means every commit is on disk before the
   next one: with NORMAL, the last ~30 s (`vm.dirty_expire_centisecs`) would sit in the page cache and
@@ -158,7 +166,9 @@ read-only, refreshes every 5 s, and runs only while its window is open. The layo
 split view that collapses to single pages below 720 px.
 
 - **Event list:** grouped by day, filtered by Problems / Errors / Everything, sources and time range,
-  with search. Runs of the same message fold into one row with a count (`×218`).
+  with search. Repeats of the same message fold into one row with a count (`×218`), even with other
+  events in between (within 10 minutes) and when only a pid differs: a login that runs the same
+  failing helper 90 times shows as one row.
 - **Overview:** error and warning counts, current CPU, memory and GPU, and a chart of the load with a
   tick for every notable event.
 - **One event:** a chart of CPU, memory and GPU at ±2 min, ±10 min or ±1 h (with a table view), the

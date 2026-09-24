@@ -1,6 +1,7 @@
 """Read-only queries over the blackbox database."""
 import calendar
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -25,16 +26,25 @@ def epoch(ts):
     return calendar.timegm(time.strptime(ts, FMT))
 
 
-def collapse(rows):
-    """Folds runs of the same message into one row with a count (rows arrive newest first)."""
-    out = []
+PID = re.compile(r"\bpid \d+")
+
+
+def collapse(rows, window=600):
+    """Folds repeats of the same message into one row with a count (rows arrive newest first).
+    Messages that differ only in a pid count as the same, and a repeat joins its group even with
+    other events in between, as long as it is within `window` seconds of the group's last one:
+    a login that runs the same failing helper 90 times shows up as one row, not 90."""
+    out, open_groups = [], {}
     for r in rows:
-        last = out[-1] if out else None
-        if last and (last["source"], last["severity"], last["summary"]) == (r["source"], r["severity"], r["summary"]):
-            last["count"] += 1
-            last["first_ts"] = r["ts"]
+        key = (r["source"], r["severity"], PID.sub("pid", r["summary"]))
+        group = open_groups.get(key)
+        if group and epoch(group["first_ts"]) - epoch(r["ts"]) <= window:
+            group["count"] += 1
+            group["first_ts"] = r["ts"]
         else:
-            out.append({**r, "count": 1, "first_ts": r["ts"]})
+            group = {**r, "count": 1, "first_ts": r["ts"]}
+            open_groups[key] = group
+            out.append(group)
     return out
 
 

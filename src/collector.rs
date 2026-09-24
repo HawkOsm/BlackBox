@@ -1,4 +1,5 @@
-use crate::{database, exit};
+use crate::exit;
+use crate::store::Store;
 use std::collections::HashMap;
 
 #[path = "netlink.rs"]
@@ -84,7 +85,7 @@ fn confirm_subscription(socket: i32) {
     }
 }
 
-fn handle_bytes(names: &mut HashMap<u32, String>, bytes: &[u8]) {
+fn handle_bytes(store: &dyn Store, names: &mut HashMap<u32, String>, bytes: &[u8]) {
     if bytes.len() < 36 + std::mem::size_of::<exit_event>() {
         return;
     }
@@ -127,7 +128,7 @@ fn handle_bytes(names: &mut HashMap<u32, String>, bytes: &[u8]) {
         },
     };
     let summary = format!("{who} {}", exit::describe(event.exit_code));
-    database::add_custom_event(
+    store.add_custom_event(
         ts,
         event.process_pid as i32,
         Some(event.parent_pid as i32),
@@ -138,7 +139,7 @@ fn handle_bytes(names: &mut HashMap<u32, String>, bytes: &[u8]) {
     );
 }
 
-fn event_handler(socket: i32) {
+fn event_handler(store: &dyn Store, socket: i32) {
     let batch = std::time::Duration::from_millis(
         std::env::var("BLACKBOX_BATCH_MS")
             .ok()
@@ -151,7 +152,7 @@ fn event_handler(socket: i32) {
         // Sleep in the kernel until something arrives...
         match socket::read_message(socket, &mut buffer) {
             Ok(0) => break,
-            Ok(n) => handle_bytes(&mut names, &buffer[..n]),
+            Ok(n) => handle_bytes(store, &mut names, &buffer[..n]),
             Err(e) if e.raw_os_error() == Some(libc::ENOBUFS) => {
                 eprintln!("kernel event buffer overflowed; some process events were dropped");
             }
@@ -167,7 +168,7 @@ fn event_handler(socket: i32) {
         loop {
             match socket::read_message_nowait(socket, &mut buffer) {
                 Ok(0) => break,
-                Ok(n) => handle_bytes(&mut names, &buffer[..n]),
+                Ok(n) => handle_bytes(store, &mut names, &buffer[..n]),
                 Err(e) if e.raw_os_error() == Some(libc::ENOBUFS) => {
                     eprintln!("kernel event buffer overflowed; some process events were dropped");
                 }
@@ -201,8 +202,8 @@ fn read_comm(pid: u32) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-pub fn build_collector() {
+pub fn build_collector(store: &dyn Store) {
     let socket = socket_handler();
     netlink_handler(socket);
-    event_handler(socket);
+    event_handler(store, socket);
 }

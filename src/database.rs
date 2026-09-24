@@ -1,4 +1,5 @@
 use crate::exit;
+use crate::store::{Boot, Journal, Sample, Store, ts_text};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -89,16 +90,6 @@ const TIME_TABLES: [&str; 7] = [
     "messages", "custom", "journald", "auditd", "sysstat", "boot", "packages",
 ];
 
-pub struct Sample {
-    pub cpu_pct: f64,
-    pub mem_pct: f64,
-    pub disk_io_kb: f64,
-    pub load_avg: f64,
-    pub gpu_pct: Option<f64>,
-    pub gpu_mem_pct: Option<f64>,
-    pub gpu_temp: Option<f64>,
-}
-
 pub fn db_path() -> String {
     if let Ok(path) = std::env::var("BLACKBOX_DB") {
         return path;
@@ -148,20 +139,6 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, kind: &str) {
         conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))
             .unwrap();
     }
-}
-
-/// The inverse of `ts_text`.
-pub fn ts_epoch(ts: &str) -> Option<i64> {
-    chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S")
-        .ok()
-        .map(|t| t.and_utc().timestamp())
-}
-
-pub fn ts_text(ts: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
-        .unwrap_or_default()
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string()
 }
 
 /// Inserts one source row and, when `alert` is set, its `messages` index row, atomically.
@@ -268,21 +245,6 @@ fn journald_duplicate(ts: &str, unit: Option<&str>, message: &str) -> bool {
         .is_ok()
 }
 
-/// One journal entry to store.
-pub struct Journal<'a> {
-    pub ts: i64,
-    pub priority: i32,
-    pub unit: Option<&'a str>,
-    pub pid: Option<i32>,
-    pub message: &'a str,
-    /// Overrides the severity the priority implies (a panic logged at info is still a crash).
-    pub severity: Option<&'a str>,
-    /// Where the follower is in the journal, saved with the row so a restart resumes exactly.
-    pub cursor: Option<(&'a str, &'a str)>,
-    /// Skip it if an identical row exists: only needed where a time-based resume overlaps.
-    pub dedup: bool,
-}
-
 pub fn add_journald(j: &Journal) {
     let ts = ts_text(j.ts);
     if j.dedup && journald_duplicate(&ts, j.unit, j.message) {
@@ -350,14 +312,6 @@ pub fn boot_recorded(kernel_boot: &str, kind: &str) -> bool {
         .is_ok()
 }
 
-pub struct Boot<'a> {
-    pub ts: i64,
-    pub kind: &'a str,
-    pub kernel_boot: &'a str,
-    pub kernel: Option<&'a str>,
-    pub note: Option<&'a str>,
-}
-
 pub fn add_boot_event(b: &Boot, severity: &str, summary: &str) {
     let ts = ts_text(b.ts);
     record("boot", &ts, Some((severity, summary)), |tx| {
@@ -367,6 +321,19 @@ pub fn add_boot_event(b: &Boot, severity: &str, summary: &str) {
         )
         .map(|_| ())
     });
+}
+
+/// Errors and warnings just before a clean shutdown are programs being killed as the session is
+/// torn down (Hyprland and Spotify both aborted during one poweroff here), not failures: keep them, as info.
+/// Returns the number of rows changed; running it again changes nothing.
+pub fn mark_shutdown(from: i64, to: i64) -> usize {
+    conn()
+        .execute(
+            "UPDATE messages SET severity = 'info', summary = summary || ' (during shutdown)'
+             WHERE ts BETWEEN ?1 AND ?2 AND severity != 'info'",
+            params![ts_text(from), ts_text(to)],
+        )
+        .unwrap_or(0)
 }
 
 pub fn add_package_change(ts: i64, command: Option<&str>, changes: &str, summary: &str) {
@@ -513,6 +480,65 @@ pub fn start_trim_thread(max_bytes: u64) {
     });
 }
 
+/// The database in this process: `Store` over the functions above.
+pub struct LocalStore;
+
+impl Store for LocalStore {
+    fn add_custom_event(
+        &self,
+        ts: i64,
+        pid: i32,
+        ppid: Option<i32>,
+        exit_code: i32,
+        comm: Option<&str>,
+        severity: &str,
+        summary: &str,
+    ) {
+        add_custom_event(ts, pid, ppid, exit_code, comm, severity, summary)
+    }
+    fn name_crash(&self, ts: i64, pid: i32, comm: Option<&str>, exe: Option<&str>) {
+        name_crash(ts, pid, comm, exe)
+    }
+    fn add_journald(&self, j: &Journal) {
+        add_journald(j)
+    }
+    fn add_auditd_event(
+        &self,
+        ts: i64,
+        event_type: &str,
+        pid: Option<i32>,
+        uid: Option<i32>,
+        executable: Option<&str>,
+        alert: Option<(&str, &str)>,
+    ) {
+        add_auditd_event(ts, event_type, pid, uid, executable, alert)
+    }
+    fn add_sysstat_event(&self, ts: i64, s: &Sample, alert: Option<(&str, &str)>) {
+        add_sysstat_event(ts, s, alert)
+    }
+    fn add_package_change(&self, ts: i64, command: Option<&str>, changes: &str, summary: &str) {
+        add_package_change(ts, command, changes, summary)
+    }
+    fn add_boot_event(&self, b: &Boot, severity: &str, summary: &str) {
+        add_boot_event(b, severity, summary)
+    }
+    fn mark_shutdown(&self, from: i64, to: i64) -> usize {
+        mark_shutdown(from, to)
+    }
+    fn boot_recorded(&self, kernel_boot: &str, kind: &str) -> bool {
+        boot_recorded(kernel_boot, kind)
+    }
+    fn last_ts(&self, table: &str) -> Option<i64> {
+        last_ts(table).as_deref().and_then(crate::store::ts_epoch)
+    }
+    fn get_state(&self, key: &str) -> Option<String> {
+        get_state(key)
+    }
+    fn set_state(&self, key: &str, value: Option<&str>) {
+        set_state(key, value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,6 +579,18 @@ mod tests {
             .query_row("SELECT journald_id FROM journald", [], |r| r.get(0))
             .unwrap();
         assert_eq!(journald_ref, journald_id, "the cursor write must not shift the row id");
+
+        // crashes in the last seconds before a clean shutdown are shutdown noise
+        add_custom_event(1_700_050_000, 7, Some(1), 6, Some("start-hyprland"), "error", "start-hyprland (pid 7) killed by SIGABRT (6)");
+        assert_eq!(mark_shutdown(1_700_049_990, 1_700_050_010), 1);
+        assert_eq!(mark_shutdown(1_700_049_990, 1_700_050_010), 0, "a second run changes nothing");
+        let (sev, text): (String, String) = conn()
+            .query_row("SELECT severity, summary FROM messages WHERE summary LIKE 'start-hyprland%'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(sev, "info");
+        assert!(text.ends_with("(during shutdown)"));
         add_auditd_event(
             1_700_000_100,
             "USER_AUTH",
@@ -580,8 +618,8 @@ mod tests {
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
                 .unwrap()
         };
-        assert_eq!(count("custom"), 3000);
-        assert_eq!(count("messages"), 3000 + 1 + 1);
+        assert_eq!(count("custom"), 3000 + 1); // + the shutdown-noise crash
+        assert_eq!(count("messages"), 3000 + 1 + 1 + 1);
         assert_eq!(count("journald"), 1);
         assert_eq!(count("sysstat"), 1);
 

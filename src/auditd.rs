@@ -1,6 +1,7 @@
-use crate::database;
+use crate::store::Store;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub struct AuditEvent {
@@ -113,8 +114,17 @@ pub fn resume_offset(path: &str, after: i64) -> u64 {
     line_at(&mut file, lo).map_or(len, |(start, _)| start)
 }
 
-pub fn start() {
-    std::thread::spawn(|| {
+/// Module loads in the first minutes after boot are the kernel bringing up its drivers.
+const BOOT_SETTLE_SECS: i64 = 180;
+
+/// A module load while the system is still booting is expected: keep it, but not as a warning.
+fn boot_noise(e: &AuditEvent, booted: Option<i64>) -> bool {
+    e.event_type == "bb_modules" && booted.is_some_and(|b| (0..BOOT_SETTLE_SECS).contains(&(e.ts - b)))
+}
+
+pub fn start(store: Arc<dyn Store>) {
+    std::thread::spawn(move || {
+        let booted = crate::boot::boot_time();
         loop {
             let path = log_path();
             if std::fs::File::open(&path).is_err() {
@@ -123,7 +133,7 @@ pub fn start() {
                 continue;
             }
             // resume after the newest stored record; the first time, start at the end
-            let from = match database::last_ts("auditd").as_deref().and_then(database::ts_epoch) {
+            let from = match store.last_ts("auditd") {
                 Some(after) => format!("+{}", resume_offset(&path, after) + 1),
                 None => format!("+{}", std::fs::metadata(&path).map_or(0, |m| m.len()) + 1),
             };
@@ -136,13 +146,16 @@ pub fn start() {
                 if let Some(out) = child.stdout.take() {
                     for line in BufReader::new(out).lines().map_while(Result::ok) {
                         if let Some(e) = parse_line(&line) {
-                            database::add_auditd_event(
+                            let quiet = boot_noise(&e, booted);
+                            store.add_auditd_event(
                                 e.ts,
                                 &e.event_type,
                                 e.pid,
                                 e.uid,
                                 e.executable.as_deref(),
-                                e.alert.as_ref().map(|(sev, text)| (*sev, text.as_str())),
+                                e.alert.as_ref().map(|(sev, text)| {
+                                    (if quiet { "info" } else { *sev }, text.as_str())
+                                }),
                             );
                         }
                     }
@@ -223,6 +236,16 @@ mod tests {
         assert_eq!(resume_offset(p, 1123), offset_of(248));
         assert_eq!(resume_offset(p, 5000), offset_of(500), "all stored: from the end");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn module_loads_while_booting_are_not_warnings() {
+        let line = r#"type=SYSCALL msg=audit(1000100.000:1): pid=9 uid=0 comm="modprobe" exe="/usr/bin/kmod" key="bb_modules""#;
+        let e = parse_line(line).unwrap();
+        assert!(boot_noise(&e, Some(1_000_000)), "100 s after boot");
+        assert!(!boot_noise(&e, Some(999_000)), "1100 s after boot");
+        assert!(!boot_noise(&e, Some(1_000_200)), "from before this boot (backfilled)");
+        assert!(!boot_noise(&e, None));
     }
 
     #[test]

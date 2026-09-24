@@ -23,6 +23,8 @@ set_conf num_logs 4
 set_conf max_log_file_action ROTATE
 
 systemctl enable --now auditd
+# starting auditd already loaded the rules: drop ours first, so reloading does not fail on duplicates
+for key in bb_identity bb_modules bb_boot; do auditctl -D -k "$key" >/dev/null 2>&1 || true; done
 augenrules --load
 
 mkdir -p /var/log/audit

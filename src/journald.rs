@@ -1,7 +1,8 @@
-use crate::database::{self, Journal};
+use crate::store::{Journal, Store, ts_text};
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub struct Entry {
@@ -44,7 +45,10 @@ pub fn parse_line(line: &str) -> Option<Entry> {
         .iter()
         .find_map(|k| v.get(*k).and_then(text));
     let pid = v.get("_PID").and_then(text).and_then(|p| p.parse().ok());
-    let message = v.get("MESSAGE").and_then(text)?;
+    let message = strip_ansi(&v.get("MESSAGE").and_then(text)?);
+    if message.trim().is_empty() {
+        return None; // the kernel sometimes logs a bare continuation line, at error priority
+    }
     let coredump = v
         .get("COREDUMP_PID")
         .and_then(text)
@@ -59,7 +63,7 @@ pub fn parse_line(line: &str) -> Option<Entry> {
         priority,
         unit,
         pid,
-        message: strip_ansi(&message),
+        message,
         cursor: v.get("__CURSOR").and_then(text),
         coredump,
     })
@@ -114,24 +118,24 @@ const FOLLOWERS: [Follower; 2] = [
     },
 ];
 
-pub fn start() {
+pub fn start(store: Arc<dyn Store>) {
     for f in FOLLOWERS {
-        std::thread::spawn(move || follow(f));
+        let store = store.clone();
+        std::thread::spawn(move || follow(&*store, f));
     }
 }
 
-fn follow(f: Follower) {
+fn follow(store: &dyn Store, f: Follower) {
     let key = format!("journald.cursor.{}", f.name);
     loop {
         // Resume exactly after the last stored entry. Without a saved cursor (first run), resume
         // by time: the overlapping second may hold entries already stored, so only those are
         // checked for duplicates. Identical messages later on are real repeats and are kept.
-        let cursor = database::get_state(&key);
-        let since = database::last_ts("journald");
-        let overlap_until = since.as_deref().and_then(database::ts_epoch);
-        let resume = match (&cursor, &since) {
+        let cursor = store.get_state(&key);
+        let overlap_until = store.last_ts("journald");
+        let resume = match (&cursor, overlap_until) {
             (Some(c), _) => format!("--after-cursor={c}"),
-            (None, Some(ts)) => format!("--since={ts} UTC"),
+            (None, Some(ts)) => format!("--since={} UTC", ts_text(ts)),
             (None, None) => "--lines=0".to_string(),
         };
         let mut args = vec!["--follow", "--output=json", "--no-pager"];
@@ -150,7 +154,7 @@ fn follow(f: Follower) {
                         lines += 1;
                         if let Some(e) = parse_line(&line) {
                             let dedup = cursor.is_none() && overlap_until.is_some_and(|t| e.ts <= t);
-                            store(&e, f, &key, dedup);
+                            record(store, &e, f, &key, dedup);
                         }
                     }
                 }
@@ -162,15 +166,15 @@ fn follow(f: Follower) {
         // was vacuumed past it): forget it and resume by time instead.
         if cursor.is_some() && lines == 0 {
             eprintln!("journald: saved position is gone, resuming by time");
-            database::set_state(&key, None);
+            store.set_state(&key, None);
         }
         std::thread::sleep(Duration::from_secs(5));
     }
 }
 
-fn store(e: &Entry, f: Follower, key: &str, dedup: bool) {
+fn record(store: &dyn Store, e: &Entry, f: Follower, key: &str, dedup: bool) {
     let routine = ROUTINE.iter().any(|r| e.message.contains(r));
-    database::add_journald(&Journal {
+    store.add_journald(&Journal {
         ts: e.ts,
         priority: e.priority,
         unit: e.unit.as_deref(),
@@ -181,7 +185,7 @@ fn store(e: &Entry, f: Follower, key: &str, dedup: bool) {
         dedup,
     });
     if let Some(c) = &e.coredump {
-        database::name_crash(e.ts, c.pid, c.comm.as_deref(), c.exe.as_deref());
+        store.name_crash(e.ts, c.pid, c.comm.as_deref(), c.exe.as_deref());
     }
 }
 
@@ -238,6 +242,11 @@ mod tests {
         let e = parse_line(&line).unwrap();
         assert_eq!(e.message, "2026 ERROR thread 'main' panicked at src/x.rs:1:2");
         assert_eq!(e.cursor.as_deref(), Some("s=1;i=2"));
+    }
+
+    #[test]
+    fn skips_empty_messages() {
+        assert!(parse_line(r#"{"__REALTIME_TIMESTAMP":"1","PRIORITY":"3","SYSLOG_IDENTIFIER":"kernel","MESSAGE":""}"#).is_none());
     }
 
     #[test]

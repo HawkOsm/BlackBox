@@ -2,10 +2,11 @@
 //! clean shutdown. A freeze, a kernel panic or a power loss kills the collector along with
 //! everything else, so this is the only way that kind of failure gets recorded at all.
 
-use crate::database::{self, Boot};
+use crate::store::{Boot, Store};
 use crate::journald::text;
 use serde_json::Value;
 use std::process::Command;
+use std::sync::Arc;
 
 /// journald's "Journal stopped", the last entry of every clean shutdown.
 const JOURNAL_STOPPED: &str = "d93fb3c9c24d451a97cea615ce59c00b";
@@ -45,8 +46,11 @@ fn read(path: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+/// How long before a clean shutdown's last entry errors count as shutdown noise.
+const SHUTDOWN_WINDOW: i64 = 30;
+
 /// When this boot started, from `btime` in /proc/stat.
-fn boot_time() -> Option<i64> {
+pub fn boot_time() -> Option<i64> {
     read("/proc/stat")?
         .lines()
         .find_map(|l| l.strip_prefix("btime "))?
@@ -66,21 +70,28 @@ fn previous_end() -> Option<End> {
         .then(|| parse_last_entry(&String::from_utf8_lossy(&out.stdout)))?
 }
 
-pub fn start() {
-    std::thread::spawn(|| {
+pub fn start(store: Arc<dyn Store>) {
+    std::thread::spawn(move || {
         // journald writes boot ids without the dashes
         let Some(this_boot) = read("/proc/sys/kernel/random/boot_id").map(|b| b.replace('-', ""))
         else {
             return;
         };
-        if database::boot_recorded(&this_boot, "start") {
+        let previous = previous_end();
+        if let Some(end) = &previous
+            && end.clean
+        {
+            // cheap and idempotent, so it runs at every start
+            store.mark_shutdown(end.ts - SHUTDOWN_WINDOW, end.ts);
+        }
+        if store.boot_recorded(&this_boot, "start") {
             return; // the service restarted within this boot
         }
-        if let Some(end) = previous_end()
+        if let Some(end) = &previous
             && !end.clean
-            && !database::boot_recorded(&end.boot, "unclean_end")
+            && !store.boot_recorded(&end.boot, "unclean_end")
         {
-            database::add_boot_event(
+            store.add_boot_event(
                 &Boot {
                     ts: end.ts,
                     kind: "unclean_end",
@@ -89,7 +100,7 @@ pub fn start() {
                     note: Some(&end.last_message),
                 },
                 "error",
-                describe(&end),
+                describe(end),
             );
         }
         let kernel = read("/proc/sys/kernel/osrelease");
@@ -99,7 +110,7 @@ pub fn start() {
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0)
         });
-        database::add_boot_event(
+        store.add_boot_event(
             &Boot {
                 ts: started,
                 kind: "start",

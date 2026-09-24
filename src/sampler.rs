@@ -1,4 +1,5 @@
-use crate::database::{self, Sample};
+use crate::store::{Sample, Store};
+use std::sync::Arc;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -161,8 +162,8 @@ fn assess(s: &Sample, cores: f64) -> Option<(&'static str, String)> {
     Some((if error { "error" } else { "warning" }, problems.join(", ")))
 }
 
-pub fn start() {
-    std::thread::spawn(|| {
+pub fn start(store: Arc<dyn Store>) {
+    std::thread::spawn(move || {
         let cores = std::thread::available_parallelism()
             .map(|n| n.get() as f64)
             .unwrap_or(1.0);
@@ -198,7 +199,7 @@ pub fn start() {
                         gpu_temp: gpu.map(|g| g.2),
                     };
                     let alert = assess(&sample, cores);
-                    database::add_sysstat_event(
+                    store.add_sysstat_event(
                         ts,
                         &sample,
                         alert.as_ref().map(|(sev, text)| (*sev, text.as_str())),

@@ -2,7 +2,8 @@
 //! question is often "what did I upgrade?". The log only changes while pacman runs, so it is
 //! checked every 30 s instead of being followed by a process that would sit there all day.
 
-use crate::database;
+use crate::store::Store;
+use std::sync::Arc;
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Duration;
 
@@ -107,17 +108,16 @@ pub fn summary(t: &Transaction) -> String {
     format!("pacman: {} · {}", counted.join(", "), listed.join(", "))
 }
 
-fn store(t: &Transaction) {
-    database::add_package_change(t.ts, t.command.as_deref(), &t.changes.join("\n"), &summary(t));
+fn record(store: &dyn Store, t: &Transaction) {
+    store.add_package_change(t.ts, t.command.as_deref(), &t.changes.join("\n"), &summary(t));
 }
 
-pub fn start() {
-    std::thread::spawn(|| {
+pub fn start(store: Arc<dyn Store>) {
+    std::thread::spawn(move || {
         let path = log_path();
         // transactions up to this time are already stored (the whole log is read at startup)
-        let mut stored_until = database::last_ts("packages")
-            .as_deref()
-            .and_then(database::ts_epoch)
+        let mut stored_until = store
+            .last_ts("packages")
             .unwrap_or(i64::MIN);
         let mut parser = Parser::default();
         let mut offset = 0u64;
@@ -144,7 +144,7 @@ pub fn start() {
                         if let Some(t) = parser.line(line)
                             && t.ts > stored_until
                         {
-                            store(&t);
+                            record(&*store, &t);
                             stored_until = t.ts;
                         }
                     }
