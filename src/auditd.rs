@@ -1,7 +1,6 @@
-use crate::store::Store;
+use crate::database;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::time::Duration;
 
 pub struct AuditEvent {
@@ -122,8 +121,8 @@ fn boot_noise(e: &AuditEvent, booted: Option<i64>) -> bool {
     e.event_type == "bb_modules" && booted.is_some_and(|b| (0..BOOT_SETTLE_SECS).contains(&(e.ts - b)))
 }
 
-pub fn start(store: Arc<dyn Store>) {
-    std::thread::spawn(move || {
+pub fn start() {
+    std::thread::spawn(|| {
         let booted = crate::boot::boot_time();
         loop {
             let path = log_path();
@@ -133,7 +132,7 @@ pub fn start(store: Arc<dyn Store>) {
                 continue;
             }
             // resume after the newest stored record; the first time, start at the end
-            let from = match store.last_ts("auditd") {
+            let from = match database::last_ts("auditd").as_deref().and_then(database::ts_epoch) {
                 Some(after) => format!("+{}", resume_offset(&path, after) + 1),
                 None => format!("+{}", std::fs::metadata(&path).map_or(0, |m| m.len()) + 1),
             };
@@ -147,7 +146,7 @@ pub fn start(store: Arc<dyn Store>) {
                     for line in BufReader::new(out).lines().map_while(Result::ok) {
                         if let Some(e) = parse_line(&line) {
                             let quiet = boot_noise(&e, booted);
-                            store.add_auditd_event(
+                            database::add_auditd_event(
                                 e.ts,
                                 &e.event_type,
                                 e.pid,

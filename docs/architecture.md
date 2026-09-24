@@ -130,11 +130,8 @@ After a clean shutdown, errors and warnings from its last 30 s are relabelled `i
 "(during shutdown)": they are programs being killed as the session is torn down (on 2026-09-24 Hyprland
 and Spotify both aborted during a poweroff), not failures. This runs at every start and is idempotent.
 
-### Database (`database.rs`, `store.rs`)
+### Database (`database.rs`)
 
-- **Sources never call it directly.** They hold an `Arc<dyn Store>` (`store.rs`), and
-  `database::LocalStore` implements it. That keeps SQL in one file and is the seam for moving the
-  store into its own process ([microservices.md](microservices.md)).
 - One shared connection, WAL mode, `synchronous=FULL`. Each event is one transaction that writes
   the source row and its `messages` row together. FULL means every commit is on disk before the
   next one: with NORMAL, the last ~30 s (`vm.dirty_expire_centisecs`) would sit in the page cache and

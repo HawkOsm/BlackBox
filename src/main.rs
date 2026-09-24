@@ -6,10 +6,6 @@ mod exit;
 mod journald;
 mod pacman;
 mod sampler;
-mod store;
-
-use std::sync::Arc;
-use store::Store;
 
 fn main() {
     database::init_database();
@@ -18,11 +14,10 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(7500);
     database::start_trim_thread(max_mb * 1_000_000);
-    let store: Arc<dyn Store> = Arc::new(database::LocalStore);
-    sampler::start(store.clone());
-    journald::start(store.clone());
-    auditd::start(store.clone());
-    pacman::start(store.clone());
-    boot::start(store.clone());
-    collector::build_collector(&*store);
+    sampler::start();
+    journald::start();
+    auditd::start();
+    pacman::start();
+    boot::start();
+    collector::build_collector();
 }

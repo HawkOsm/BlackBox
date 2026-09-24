@@ -1,8 +1,7 @@
-use crate::store::{Journal, Store, ts_text};
+use crate::database::{self, Journal};
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::time::Duration;
 
 pub struct Entry {
@@ -118,24 +117,24 @@ const FOLLOWERS: [Follower; 2] = [
     },
 ];
 
-pub fn start(store: Arc<dyn Store>) {
+pub fn start() {
     for f in FOLLOWERS {
-        let store = store.clone();
-        std::thread::spawn(move || follow(&*store, f));
+        std::thread::spawn(move || follow(f));
     }
 }
 
-fn follow(store: &dyn Store, f: Follower) {
+fn follow(f: Follower) {
     let key = format!("journald.cursor.{}", f.name);
     loop {
         // Resume exactly after the last stored entry. Without a saved cursor (first run), resume
         // by time: the overlapping second may hold entries already stored, so only those are
         // checked for duplicates. Identical messages later on are real repeats and are kept.
-        let cursor = store.get_state(&key);
-        let overlap_until = store.last_ts("journald");
-        let resume = match (&cursor, overlap_until) {
+        let cursor = database::get_state(&key);
+        let since = database::last_ts("journald");
+        let overlap_until = since.as_deref().and_then(database::ts_epoch);
+        let resume = match (&cursor, &since) {
             (Some(c), _) => format!("--after-cursor={c}"),
-            (None, Some(ts)) => format!("--since={} UTC", ts_text(ts)),
+            (None, Some(ts)) => format!("--since={ts} UTC"),
             (None, None) => "--lines=0".to_string(),
         };
         let mut args = vec!["--follow", "--output=json", "--no-pager"];
@@ -154,7 +153,7 @@ fn follow(store: &dyn Store, f: Follower) {
                         lines += 1;
                         if let Some(e) = parse_line(&line) {
                             let dedup = cursor.is_none() && overlap_until.is_some_and(|t| e.ts <= t);
-                            record(store, &e, f, &key, dedup);
+                            store(&e, f, &key, dedup);
                         }
                     }
                 }
@@ -166,15 +165,15 @@ fn follow(store: &dyn Store, f: Follower) {
         // was vacuumed past it): forget it and resume by time instead.
         if cursor.is_some() && lines == 0 {
             eprintln!("journald: saved position is gone, resuming by time");
-            store.set_state(&key, None);
+            database::set_state(&key, None);
         }
         std::thread::sleep(Duration::from_secs(5));
     }
 }
 
-fn record(store: &dyn Store, e: &Entry, f: Follower, key: &str, dedup: bool) {
+fn store(e: &Entry, f: Follower, key: &str, dedup: bool) {
     let routine = ROUTINE.iter().any(|r| e.message.contains(r));
-    store.add_journald(&Journal {
+    database::add_journald(&Journal {
         ts: e.ts,
         priority: e.priority,
         unit: e.unit.as_deref(),
@@ -185,7 +184,7 @@ fn record(store: &dyn Store, e: &Entry, f: Follower, key: &str, dedup: bool) {
         dedup,
     });
     if let Some(c) = &e.coredump {
-        store.name_crash(e.ts, c.pid, c.comm.as_deref(), c.exe.as_deref());
+        database::name_crash(e.ts, c.pid, c.comm.as_deref(), c.exe.as_deref());
     }
 }
 

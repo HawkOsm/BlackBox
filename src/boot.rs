@@ -2,11 +2,10 @@
 //! clean shutdown. A freeze, a kernel panic or a power loss kills the collector along with
 //! everything else, so this is the only way that kind of failure gets recorded at all.
 
-use crate::store::{Boot, Store};
+use crate::database::{self, Boot};
 use crate::journald::text;
 use serde_json::Value;
 use std::process::Command;
-use std::sync::Arc;
 
 /// journald's "Journal stopped", the last entry of every clean shutdown.
 const JOURNAL_STOPPED: &str = "d93fb3c9c24d451a97cea615ce59c00b";
@@ -70,8 +69,8 @@ fn previous_end() -> Option<End> {
         .then(|| parse_last_entry(&String::from_utf8_lossy(&out.stdout)))?
 }
 
-pub fn start(store: Arc<dyn Store>) {
-    std::thread::spawn(move || {
+pub fn start() {
+    std::thread::spawn(|| {
         // journald writes boot ids without the dashes
         let Some(this_boot) = read("/proc/sys/kernel/random/boot_id").map(|b| b.replace('-', ""))
         else {
@@ -82,16 +81,16 @@ pub fn start(store: Arc<dyn Store>) {
             && end.clean
         {
             // cheap and idempotent, so it runs at every start
-            store.mark_shutdown(end.ts - SHUTDOWN_WINDOW, end.ts);
+            database::mark_shutdown(end.ts - SHUTDOWN_WINDOW, end.ts);
         }
-        if store.boot_recorded(&this_boot, "start") {
+        if database::boot_recorded(&this_boot, "start") {
             return; // the service restarted within this boot
         }
         if let Some(end) = &previous
             && !end.clean
-            && !store.boot_recorded(&end.boot, "unclean_end")
+            && !database::boot_recorded(&end.boot, "unclean_end")
         {
-            store.add_boot_event(
+            database::add_boot_event(
                 &Boot {
                     ts: end.ts,
                     kind: "unclean_end",
@@ -110,7 +109,7 @@ pub fn start(store: Arc<dyn Store>) {
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0)
         });
-        store.add_boot_event(
+        database::add_boot_event(
             &Boot {
                 ts: started,
                 kind: "start",
