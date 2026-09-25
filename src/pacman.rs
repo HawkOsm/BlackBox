@@ -7,10 +7,24 @@ use std::io::{Read, Seek, SeekFrom};
 use std::time::Duration;
 
 const POLL: Duration = Duration::from_secs(30);
-const ACTIONS: [&str; 5] = ["upgraded", "installed", "removed", "downgraded", "reinstalled"];
+const ACTIONS: [&str; 5] = [
+    "upgraded",
+    "installed",
+    "removed",
+    "downgraded",
+    "reinstalled",
+];
 /// Packages that most often explain a machine that stopped working, listed first in a summary.
 const KEY_PACKAGES: [&str; 9] = [
-    "linux", "nvidia", "mesa", "systemd", "glibc", "mkinitcpio", "grub", "ucode", "firmware",
+    "linux",
+    "nvidia",
+    "mesa",
+    "systemd",
+    "glibc",
+    "mkinitcpio",
+    "grub",
+    "ucode",
+    "firmware",
 ];
 
 fn log_path() -> String {
@@ -92,7 +106,9 @@ pub fn summary(t: &Transaction) -> String {
             let key = is_key(name);
             // a version is worth the space only for the packages that tend to break things
             let shown = match c.split_once('(').map(|(_, v)| v.trim_end_matches(')')) {
-                Some(v) if key && action == "upgraded" => format!("{name} {}", v.replace("->", "→")),
+                Some(v) if key && action == "upgraded" => {
+                    format!("{name} {}", v.replace("->", "→"))
+                }
                 _ => name.to_string(),
             };
             Some((key, shown))
@@ -108,7 +124,12 @@ pub fn summary(t: &Transaction) -> String {
 }
 
 fn store(t: &Transaction) {
-    database::add_package_change(t.ts, t.command.as_deref(), &t.changes.join("\n"), &summary(t));
+    database::add_package_change(
+        t.ts,
+        t.command.as_deref(),
+        &t.changes.join("\n"),
+        &summary(t),
+    );
 }
 
 pub fn start() {
@@ -179,7 +200,11 @@ mod tests {
     fn one_row_per_transaction_with_key_packages_first() {
         let mut p = Parser::default();
         let done: Vec<Transaction> = LOG.lines().filter_map(|l| p.line(l)).collect();
-        assert_eq!(done.len(), 1, "a failed transaction that changed nothing is not stored");
+        assert_eq!(
+            done.len(),
+            1,
+            "a failed transaction that changed nothing is not stored"
+        );
         let t = &done[0];
         assert_eq!(t.ts, 1_790_104_241); // 22:10:41 +03:00
         assert_eq!(t.command.as_deref(), Some("pacman -Syu"));
@@ -194,6 +219,9 @@ mod tests {
     fn ignores_lines_it_does_not_know() {
         let mut p = Parser::default();
         assert!(p.line("garbage").is_none());
-        assert!(p.line("[2019-01-01 10:00] [ALPM] transaction completed").is_none());
+        assert!(
+            p.line("[2019-01-01 10:00] [ALPM] transaction completed")
+                .is_none()
+        );
     }
 }

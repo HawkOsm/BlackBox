@@ -118,7 +118,8 @@ const BOOT_SETTLE_SECS: i64 = 180;
 
 /// A module load while the system is still booting is expected: keep it, but not as a warning.
 fn boot_noise(e: &AuditEvent, booted: Option<i64>) -> bool {
-    e.event_type == "bb_modules" && booted.is_some_and(|b| (0..BOOT_SETTLE_SECS).contains(&(e.ts - b)))
+    e.event_type == "bb_modules"
+        && booted.is_some_and(|b| (0..BOOT_SETTLE_SECS).contains(&(e.ts - b)))
 }
 
 pub fn start() {
@@ -132,7 +133,10 @@ pub fn start() {
                 continue;
             }
             // resume after the newest stored record; the first time, start at the end
-            let from = match database::last_ts("auditd").as_deref().and_then(database::ts_epoch) {
+            let from = match database::last_ts("auditd")
+                .as_deref()
+                .and_then(database::ts_epoch)
+            {
                 Some(after) => format!("+{}", resume_offset(&path, after) + 1),
                 None => format!("+{}", std::fs::metadata(&path).map_or(0, |m| m.len()) + 1),
             };
@@ -225,15 +229,33 @@ mod tests {
     fn resumes_after_the_last_stored_record() {
         let path = std::env::temp_dir().join(format!("bb_audit_{}.log", std::process::id()));
         let lines: Vec<String> = (0..500)
-            .map(|i| format!("type=SYSCALL msg=audit({}.000:{i}): pid=1 {}\n", 1000 + i / 2, "x".repeat(i % 97)))
+            .map(|i| {
+                format!(
+                    "type=SYSCALL msg=audit({}.000:{i}): pid=1 {}\n",
+                    1000 + i / 2,
+                    "x".repeat(i % 97)
+                )
+            })
             .collect();
         std::fs::write(&path, lines.concat()).unwrap();
         let p = path.to_str().unwrap();
         let offset_of = |i: usize| lines[..i].iter().map(|l| l.len() as u64).sum::<u64>();
-        assert_eq!(resume_offset(p, 999), 0, "nothing stored yet in this range: from the top");
-        assert_eq!(resume_offset(p, 1000), offset_of(2), "past both lines of second 1000");
+        assert_eq!(
+            resume_offset(p, 999),
+            0,
+            "nothing stored yet in this range: from the top"
+        );
+        assert_eq!(
+            resume_offset(p, 1000),
+            offset_of(2),
+            "past both lines of second 1000"
+        );
         assert_eq!(resume_offset(p, 1123), offset_of(248));
-        assert_eq!(resume_offset(p, 5000), offset_of(500), "all stored: from the end");
+        assert_eq!(
+            resume_offset(p, 5000),
+            offset_of(500),
+            "all stored: from the end"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -243,7 +265,10 @@ mod tests {
         let e = parse_line(line).unwrap();
         assert!(boot_noise(&e, Some(1_000_000)), "100 s after boot");
         assert!(!boot_noise(&e, Some(999_000)), "1100 s after boot");
-        assert!(!boot_noise(&e, Some(1_000_200)), "from before this boot (backfilled)");
+        assert!(
+            !boot_noise(&e, Some(1_000_200)),
+            "from before this boot (backfilled)"
+        );
         assert!(!boot_noise(&e, None));
     }
 

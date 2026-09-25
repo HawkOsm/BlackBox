@@ -1,4 +1,4 @@
-use crate::database::{self, Sample};
+use crate::database::{self, ProcSample, Sample};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -89,7 +89,11 @@ fn nvidia_asleep() -> bool {
 
 /// Runs a command but gives up, killing it, after `limit`: a hung driver must not stall the sampler.
 fn output_within(cmd: &mut Command, limit: Duration) -> Option<std::process::Output> {
-    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
     let started = Instant::now();
     loop {
         match child.try_wait() {
@@ -132,6 +136,57 @@ fn read_gpu() -> Option<(f64, f64, f64)> {
         return None;
     }
     Some((v[0], 100.0 * v[1] / v[2], v[3]))
+}
+
+/// The `n` processes using the most memory. RSS ranks them all (cheap); the accurate
+/// PSS is read only for the winners, because smaps_rollup is slow to read.
+/// The number after `name` in a "/proc" key-value file, like "VmRSS:   1234 kB".
+fn kb_field(text: &str, name: &str) -> Option<i64> {
+    text.lines()
+        .find(|l| l.starts_with(name))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+fn read_top_procs(n: usize) -> Vec<ProcSample> {
+    let mut all: Vec<ProcSample> = Vec::new();
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return all;
+    };
+    for entry in dir.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+            continue;
+        };
+        let Some(rss_kb) = kb_field(&status, "VmRSS:") else {
+            continue; // kernel threads have no VmRSS
+        };
+
+        let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) else {
+            continue;
+        };
+        let comm = comm.trim();
+
+        all.push(ProcSample {
+            pid,
+            comm: comm.to_string(),
+            rss_kb,
+            pss_kb: None,
+        });
+    }
+    all.sort_by_key(|p| std::cmp::Reverse(p.rss_kb));
+    all.truncate(n);
+    for proc in &mut all {
+        let Ok(smaps) = std::fs::read_to_string(format!("/proc/{}/smaps_rollup", proc.pid)) else {
+            continue;
+        };
+        proc.pss_kb = kb_field(&smaps, "Pss:");
+    }
+    all
 }
 
 fn assess(s: &Sample, cores: f64) -> Option<(&'static str, String)> {
@@ -203,6 +258,9 @@ pub fn start() {
                         &sample,
                         alert.as_ref().map(|(sev, text)| (*sev, text.as_str())),
                     );
+                    if tick % 3 == 1 {
+                        database::add_procstat(ts, &read_top_procs(5));
+                    }
                 }
             }
             prev = now;

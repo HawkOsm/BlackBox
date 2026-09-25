@@ -1,0 +1,6 @@
+# Lint rules for the Python UI, pinned so a new ruff release can't turn CI red on its own.
+# E + F catch real mistakes (syntax errors, undefined names, unused imports); line length is
+# left to the author.
+[lint]
+select = ["E", "F"]
+ignore = ["E501"]

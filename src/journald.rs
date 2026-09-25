@@ -152,7 +152,8 @@ fn follow(f: Follower) {
                     for line in BufReader::new(out).lines().map_while(Result::ok) {
                         lines += 1;
                         if let Some(e) = parse_line(&line) {
-                            let dedup = cursor.is_none() && overlap_until.is_some_and(|t| e.ts <= t);
+                            let dedup =
+                                cursor.is_none() && overlap_until.is_some_and(|t| e.ts <= t);
                             store(&e, f, &key, dedup);
                         }
                     }
@@ -230,16 +231,20 @@ mod tests {
     #[test]
     fn strips_colour_codes_and_keeps_the_cursor() {
         // how warp-svc logs a panic: bytes, with colour codes
-        let msg: Vec<String> = "\x1b[2m2026\x1b[0m \x1b[31mERROR\x1b[0m thread 'main' panicked at src/x.rs:1:2"
-            .bytes()
-            .map(|b| b.to_string())
-            .collect();
+        let msg: Vec<String> =
+            "\x1b[2m2026\x1b[0m \x1b[31mERROR\x1b[0m thread 'main' panicked at src/x.rs:1:2"
+                .bytes()
+                .map(|b| b.to_string())
+                .collect();
         let line = format!(
             r#"{{"__REALTIME_TIMESTAMP":"1000000","__CURSOR":"s=1;i=2","PRIORITY":"6","MESSAGE":[{}]}}"#,
             msg.join(",")
         );
         let e = parse_line(&line).unwrap();
-        assert_eq!(e.message, "2026 ERROR thread 'main' panicked at src/x.rs:1:2");
+        assert_eq!(
+            e.message,
+            "2026 ERROR thread 'main' panicked at src/x.rs:1:2"
+        );
         assert_eq!(e.cursor.as_deref(), Some("s=1;i=2"));
     }
 

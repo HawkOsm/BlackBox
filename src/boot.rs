@@ -118,7 +118,10 @@ pub fn start() {
                 note: None,
             },
             "info",
-            &format!("System started, kernel {}", kernel.as_deref().unwrap_or("unknown")),
+            &format!(
+                "System started, kernel {}",
+                kernel.as_deref().unwrap_or("unknown")
+            ),
         );
     });
 }

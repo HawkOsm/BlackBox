@@ -79,8 +79,12 @@ fn confirm_subscription(socket: i32) {
             "the kernel refused the process-event subscription: {}; crashes will not be recorded",
             std::io::Error::from_raw_os_error(err as i32)
         ),
-        Some(Err(e)) => eprintln!("no answer to the process-event subscription ({e}); crashes may not be recorded"),
-        None => eprintln!("no answer to the process-event subscription; crashes may not be recorded"),
+        Some(Err(e)) => eprintln!(
+            "no answer to the process-event subscription ({e}); crashes may not be recorded"
+        ),
+        None => {
+            eprintln!("no answer to the process-event subscription; crashes may not be recorded")
+        }
     }
 }
 
