@@ -1,0 +1,8 @@
+post_install() {
+    echo '==> Start the recorder as your normal user (not root):'
+    echo '      systemctl --user enable --now blackbox.service'
+    echo '    Keep it running from boot, even when logged out:'
+    echo '      sudo loginctl enable-linger "$USER"'
+    echo '    Optional audit source (failed logins, sudo, module loads):'
+    echo '      sudo bash /usr/share/blackbox/setup-auditd.sh'
+}

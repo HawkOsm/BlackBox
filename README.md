@@ -5,6 +5,10 @@ need after something goes wrong: crashes, error logs, failed logins, package upg
 system load. A desktop app shows any of those moments together with everything else that was
 happening on the machine at the time.
 
+> **Built for Arch Linux first.** It currently needs pacman, systemd and journald, and reads NVIDIA
+> GPU stats if `nvidia-smi` exists. Support for other distributions and package managers (apt, dnf)
+> is planned, and contributions are welcome.
+
 ![The Blackbox app: recorded problems on the left; the last 24 hours on the right, with error and warning counts, current CPU, memory and GPU, a load chart and the latest problems](docs/screenshot.webp)
 
 ## Why
@@ -95,7 +99,12 @@ reclaim those pages at any time.
 
 ## Install
 
+You need `rust` (cargo), `sqlite`, and for the viewer `python-gobject`, `gtk4` and `libadwaita`:
+
 ```bash
+sudo pacman -S --needed rust sqlite python-gobject gtk4 libadwaita
+git clone https://github.com/HawkOsm/BlackBox.git
+cd BlackBox
 deploy/install.sh
 ```
 
@@ -112,6 +121,9 @@ This installs the audit rules, caps the audit log at 2 GB and makes it readable 
 
 To remove everything, run `deploy/install.sh uninstall`. Add `--purge` to delete the recorded data
 too.
+
+Prefer a package? `deploy/aur/` has a `PKGBUILD` you can build yourself with `makepkg -si`. It is
+not on the AUR yet.
 
 ## Use
 
@@ -212,4 +224,4 @@ Screenshots also render headless: start `gtk4-broadwayd :7`, then run the app wi
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+GNU GPL v3 or later, see [LICENSE](LICENSE).

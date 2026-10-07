@@ -1,0 +1,67 @@
+# Maintainer: Osman Sahin Guler <osmansahinguler@gmail.com>
+pkgname=blackbox-git
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+pkgdesc='Flight recorder for a Linux desktop: crashes, logs, package upgrades and system load in one SQLite file'
+arch=('x86_64')
+url='https://github.com/HawkOsm/BlackBox'
+license=('GPL-3.0-or-later')
+depends=('systemd' 'sqlite' 'python-gobject' 'gtk4' 'libadwaita')
+makedepends=('cargo' 'git')
+optdepends=('audit: record failed logins, sudo use and kernel module loads'
+            'nvidia-utils: record GPU load, memory and temperature')
+provides=('blackbox')
+conflicts=('blackbox')
+install=blackbox.install
+source=("$pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$pkgname"
+    # no tags yet: 0.1.0.r<commit count>.g<short hash>
+    printf '0.1.0.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+    cd "$pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo build --release --frozen
+}
+
+check() {
+    cd "$pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo test --frozen
+}
+
+package() {
+    cd "$pkgname"
+    install -Dm755 target/release/blackbox "$pkgdir/usr/bin/blackbox"
+
+    # viewer: the app imports data.py from its own directory
+    install -Dm644 ui/data.py "$pkgdir/usr/share/blackbox/ui/data.py"
+    install -Dm755 ui/blackbox_app.py "$pkgdir/usr/share/blackbox/ui/blackbox_app.py"
+
+    # the repo's unit and desktop file are written for ~/.local installs; point them at /usr
+    install -d "$pkgdir/usr/lib/systemd/user"
+    sed 's|%h/.local/bin/blackbox|/usr/bin/blackbox|' deploy/blackbox.service \
+        > "$pkgdir/usr/lib/systemd/user/blackbox.service"
+    install -d "$pkgdir/usr/share/applications"
+    sed 's|@HOME@/.local/share/blackbox|/usr/share/blackbox|' deploy/io.github.hawkosm.Blackbox.desktop \
+        > "$pkgdir/usr/share/applications/io.github.hawkosm.Blackbox.desktop"
+    install -Dm644 deploy/io.github.hawkosm.Blackbox.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.hawkosm.Blackbox.svg"
+
+    # auditd source (optional, needs root once)
+    install -Dm644 deploy/blackbox.rules "$pkgdir/usr/share/blackbox/blackbox.rules"
+    install -Dm755 deploy/setup-auditd.sh "$pkgdir/usr/share/blackbox/setup-auditd.sh"
+
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 docs/architecture.md "$pkgdir/usr/share/doc/$pkgname/architecture.md"
+}
