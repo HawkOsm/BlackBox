@@ -5,7 +5,7 @@ Description=Blackbox system recorder
 Type=simple
 WorkingDirectory=%h/.local/share/blackbox
 Environment=BLACKBOX_DB=%h/.local/share/blackbox/blackbox.db
-Environment=BLACKBOX_MAX_MB=7500
+Environment=BLACKBOX_MAX_MB=50000
 ExecStart=%h/.local/bin/blackbox
 Restart=always
 RestartSec=5

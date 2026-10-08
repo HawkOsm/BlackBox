@@ -8,7 +8,7 @@
  journalctl --follow (warning+) ─────► journald ─┤
  journalctl --follow (panics) ───────► journald ─┼──► database.rs ──► blackbox.db ◄── Blackbox app
  tail -F /var/log/audit/audit.log ───► auditd ───┤   (one connection,   (SQLite,       (read only,
- /var/log/pacman.log (every 30 s) ───► pacman ───┤    WAL, one          7.5 GB ring)    only while open)
+ /var/log/pacman.log (every 30 s) ───► pacman ───┤    WAL, one          50 GB ring)     only while open)
  previous boot's last journal entry ─► boot ─────┘    transaction per
                                                       event)
 ```
@@ -50,6 +50,28 @@ events.
   journal entry (`COREDUMP_PID`, `COREDUMP_COMM`, `COREDUMP_EXE`), which also fills in `custom.exe`
   with the full executable path.
 - **Overflow.** If the kernel queue overflows (`ENOBUFS`) it logs it and carries on.
+
+### Power (`power.rs`)
+
+Every sampler tick also writes one `power` row: `on_battery`, `battery_pct`, `cpu_watt`,
+`gpu_watt` and `battery_watt`. CPU watts are the difference of the RAPL package counter
+(`/sys/class/powercap/intel-rapl:0/energy_uj`) over the elapsed time, wrap-around included; a gap
+over 30 s (suspend) is dropped rather than averaged in. The counter is root-only, so
+`deploy/setup-sensors.sh` opens it to group `wheel`; without it `cpu_watt` stays NULL. `gpu_watt` is
+filled only on the ticks where `nvidia-smi` is polled. `battery_watt` is the whole machine's draw
+and is set only while discharging.
+
+### Sensors (`sensors.rs`)
+
+Every tick also reads all of `/sys/class/hwmon` (no root needed): every temperature (each CPU
+core and the package, both NVMe drives, the DRAM modules' own sensors, Wi-Fi, ACPI), every fan
+and any power input, and the RAPL domains the package row does not cover (cores, uncore, DRAM,
+and `psys`, the whole platform). One row per reading goes into `sensors(ts, kind, name, value)`,
+named `chip/label`; chips that share a name (two NVMe drives) get their device in brackets. The
+viewer charts the CPU package, the hottest NVMe drive and platform power, and lists every
+reading under "Everything being logged". RAPL watts need `deploy/setup-sensors.sh`, which
+`install.sh` offers to run. About 27 readings are stored per tick on the development machine, a
+few hundred thousand rows a day.
 
 ### Sampler (`sampler.rs`)
 
@@ -158,6 +180,16 @@ and Spotify both aborted during a poweroff), not failures. This runs at every st
 
 ### Viewer (`ui/`)
 
+Modules: `blackbox_app.py` (entry point), `window.py` (the window, built from the mixins
+`sidebar.py`, `overview.py`, `detail.py` and `refresh.py`), `widgets.py`, `chart.py`, `fmt.py`
+(text helpers), `consts.py` (labels, colours, stylesheet), `gtkenv.py` (pins the GTK versions) and
+`data.py` (read-only queries). The list and overview are read on a worker thread and applied on the
+main thread, one read at a time. The event list is paged: a new filter or time range reads only
+the newest 200 rows, older pages are read as the list is scrolled towards its end, and it stops at
+1,000 rows (the footer says so; narrow the range for more). Rows are built 30 per idle callback,
+and every query is cancelled after 8 s, so a huge database cannot freeze the window. While older
+pages are loaded the 5-second timer leaves the list alone.
+
 A native GTK4 and libadwaita app, `io.github.hawkosm.Blackbox`, listed in the application menu. It is
 read-only, refreshes every 5 s, and runs only while its window is open. The layout is an adaptive
 split view that collapses to single pages below 720 px.
@@ -166,24 +198,25 @@ split view that collapses to single pages below 720 px.
   with search. Repeats of the same message fold into one row with a count (`×218`), even with other
   events in between (within 10 minutes) and when only a pid differs: a login that runs the same
   failing helper 90 times shows as one row.
-- **Overview:** error and warning counts, current CPU, memory and GPU, and a chart of the load with a
-  tick for every notable event.
-- **One event:** a chart of CPU, memory and GPU at ±2 min, ±10 min or ±1 h (with a table view), the
+- **Overview:** error and warning counts, current CPU, memory, GPU and power (CPU watts, battery
+  state), and three charts with a tick for every notable event: usage (CPU, memory, GPU, in %),
+  temperature (GPU, in °C) and power (CPU, GPU and battery draw, in W).
+- **One event:** the same three charts at ±2 min, ±10 min or ±1 h (each with a table view), the
   crash's stack trace from systemd-coredump, the full row with readable field names, and every event
   around it with its offset. Copy puts all of that on the clipboard as a plain-text report.
 - **Go to a time:** the clock button opens the same view for any moment, even one where nothing was
   recorded (a freeze, for example).
 
-Chart colours are one axis (percent) with fixed hues for CPU, memory and GPU, checked for
+Each chart has one axis in one unit (percent, °C or W) with fixed hues for CPU, memory (and battery) and GPU, checked for
 colour-blind separation against both the light and the dark card surface.
 
 ## Storage budget
 
-The whole system stays within 10 GB:
+The whole system stays within 52.5 GB:
 
 | Part | Limit | Set by |
 |---|---|---|
-| Database | 7.5 GB | `BLACKBOX_MAX_MB` |
+| Database | 50 GB | `BLACKBOX_MAX_MB` |
 | Audit log | 2 GB (4 x 500 MB) | `deploy/setup-auditd.sh` |
 | Headroom (WAL, trim slack) | 0.5 GB | |
 
@@ -191,7 +224,7 @@ journald's own journal is managed by systemd and is not counted; only its warnin
 copied into the database. At the volume recorded now (crashes, plus one system sample every 10 s
 at roughly 1 MB a day) the database will not come near its cap for years. Storing every whole-process
 exit (about 22 a second, at about 180 bytes each) would use roughly 340 MB a day, so about three weeks of
-history in 7.5 GB.
+history in 50 GB.
 
 ## Schema
 

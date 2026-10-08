@@ -1,6 +1,6 @@
 pub(super) const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS messages (
-        source   TEXT    NOT NULL,   -- 'journald' | 'auditd' | 'sysstat' | 'custom'
+        source   TEXT    NOT NULL,   -- 'journald' | 'auditd' | 'sysstat'
         ref_id   INTEGER NOT NULL,   -- id of the row in that source's own table
         ts       TEXT    NOT NULL,   -- UTC 'YYYY-MM-DD HH:MM:SS'
         severity TEXT    NOT NULL,   -- 'error' | 'warning' | 'info'
@@ -53,6 +53,26 @@ pub(super) const SCHEMA: &str = "
     );
     CREATE INDEX IF NOT EXISTS idx_sysstat_ts ON sysstat(ts);
 
+    CREATE TABLE IF NOT EXISTS power (
+        power_id     INTEGER PRIMARY KEY,
+        ts           TEXT    NOT NULL,
+        on_battery   INTEGER,          -- 1 discharging, 0 not; NULL on a machine without a battery
+        battery_pct  REAL,
+        cpu_watt     REAL,             -- CPU package, from the RAPL energy counter
+        gpu_watt     REAL,             -- nvidia-smi, NULL between its polls and while asleep
+        battery_watt REAL              -- whole-machine draw, only while discharging
+    );
+    CREATE INDEX IF NOT EXISTS idx_power_ts ON power(ts);
+
+    CREATE TABLE IF NOT EXISTS sensors (
+        sensor_id INTEGER PRIMARY KEY,
+        ts        TEXT    NOT NULL,
+        kind      TEXT    NOT NULL,    -- 'temp' (C) | 'fan' (rpm) | 'power' (W)
+        name      TEXT    NOT NULL,    -- 'chip/label', e.g. 'coretemp/Package id 0', 'rapl/psys'
+        value     REAL    NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sensors_ts ON sensors(ts);
+
     CREATE TABLE IF NOT EXISTS boot (
         boot_id     INTEGER PRIMARY KEY,
         ts          TEXT    NOT NULL,
@@ -89,6 +109,7 @@ pub(super) const SCHEMA: &str = "
 
 ";
 
-pub(super) const TIME_TABLES: [&str; 8] = [
-    "messages", "custom", "journald", "auditd", "sysstat", "boot", "packages", "procstat",
+pub(super) const TIME_TABLES: [&str; 10] = [
+    "messages", "custom", "journald", "auditd", "sysstat", "power", "sensors", "boot", "packages",
+    "procstat",
 ];
