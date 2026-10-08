@@ -1,8 +1,11 @@
-"""Small reusable widgets: stat tiles, chart cards, event rows."""
+"""Small reusable widgets: chart cards, event rows and their sparklines."""
 from gtkenv import Gtk, Pango
-from chart import Chart, legend
+from chart import Chart, hex_rgb, legend
 from consts import ICON, LABEL, MOMENT_ICON, TONE
-from fmt import ago, local, readable
+from fmt import ago, local, readable, split_summary
+
+SEVERITY_RGB = {"error": "#EF4444", "warning": "#F2B33D", "info": "#D6D9E9"}
+EMPTY_HOUR = hex_rgb("#3A3A49")
 
 
 def rows_table(spec, rows):
@@ -47,49 +50,60 @@ def chart_card(title, chart, keys, extra=None, table=None):
     return card
 
 
-def tile(caption, value, detail=None, icon=None, tone=None):
-    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, css_classes=["card", "tile"])
-    head = Gtk.Box(spacing=6)
-    if icon:
-        head.append(Gtk.Image(icon_name=icon, css_classes=[tone] if tone else []))
-    head.append(Gtk.Label(label=caption, xalign=0, css_classes=["caption-heading", "dim-label"]))
-    box.append(head)
-    box.append(Gtk.Label(label=value, xalign=0, css_classes=["tile-value"]))
-    box.append(Gtk.Label(label=detail or " ", xalign=0, css_classes=["caption", "dim-label"]))
-    return box
-
-
 def event_icon(m, size=16):
     if m.get("moment"):
         return Gtk.Image(icon_name=MOMENT_ICON, pixel_size=size, css_classes=["dim-label"])
     return Gtk.Image(icon_name=ICON.get(m["severity"], ICON["info"]), pixel_size=size, css_classes=[TONE.get(m["severity"], "dim-label")])
 
 
+class Sparkline(Gtk.DrawingArea):
+    """The last 24 hours of one folded row: an hourly bar each, 2 px wide and 1 px apart, in the
+    row's severity colour; an hour with nothing is a 1 px stub."""
+
+    def __init__(self, hours, severity):
+        super().__init__(content_width=24 * 3 - 1, content_height=14, halign=Gtk.Align.END, valign=Gtk.Align.END)
+        self.hours, self.color = hours, hex_rgb(SEVERITY_RGB.get(severity, SEVERITY_RGB["info"]))
+        self.set_draw_func(self.draw)
+
+    def draw(self, _area, cr, _width, height):
+        peak = max(self.hours, default=0) or 1
+        for i, n in enumerate(self.hours):
+            if n:
+                h = max(2, round(n / peak * height))
+                cr.set_source_rgb(*self.color)
+            else:
+                h = 1
+                cr.set_source_rgb(*EMPTY_HOUR)
+            cr.rectangle(i * 3, height - h, 2, h)
+            cr.fill()
+
+
 class EventRow(Gtk.ListBoxRow):
-    def __init__(self, m):
+    """dot | name and description over the reason | time and count over the sparkline"""
+
+    def __init__(self, m, hours=None):
         super().__init__()
         self.event = m
-        box = Gtk.Box(spacing=12, margin_top=8, margin_bottom=8, margin_start=6, margin_end=6)
-        icon = event_icon(m)
-        icon.set_valign(Gtk.Align.START)
-        icon.set_margin_top(2)
-        box.append(icon)
-        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, hexpand=True)
-        text.append(Gtk.Label(
-            label=readable(m["summary"]), xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR, lines=2,
-            ellipsize=Pango.EllipsizeMode.END, max_width_chars=50, css_classes=["event-title"],
-        ))
-        self.meta = Gtk.Label(xalign=0, css_classes=["caption", "dim-label"])
-        text.append(self.meta)
-        self.update_age()
-        box.append(text)
+        name, desc, detail = split_summary(m["source"], m["severity"], m["summary"])
+        grid = Gtk.Grid(column_spacing=10)
+        dot = Gtk.Box(css_classes=["sev-dot", f"sev-{m['severity']}"], valign=Gtk.Align.START, halign=Gtk.Align.START)
+        grid.attach(dot, 0, 0, 1, 2)
+        line = Gtk.Box(spacing=6, hexpand=True)
+        # a name of up to 20 characters is never cut; a longer one gives way at 20
+        long_name = len(name) > 20
+        line.append(Gtk.Label(label=name, xalign=0, css_classes=["ev-name"], ellipsize=Pango.EllipsizeMode.END if long_name else Pango.EllipsizeMode.NONE,
+                              width_chars=20 if long_name else -1, max_width_chars=20 if long_name else -1))
+        if desc:
+            line.append(Gtk.Label(label=desc, xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END, css_classes=["ev-desc"]))
+        grid.attach(line, 1, 0, 1, 1)
+        grid.attach(Gtk.Label(label=detail or LABEL.get(m["source"], m["source"]), xalign=0, hexpand=True, width_chars=1,
+                              ellipsize=Pango.EllipsizeMode.END, css_classes=["ev-detail"]), 1, 1, 1, 1)
+        top = Gtk.Box(spacing=6, halign=Gtk.Align.END)
+        top.append(Gtk.Label(label=local(m["ts"], "%H:%M"), css_classes=["ev-time"]))
         if m.get("count", 1) > 1:
-            box.append(Gtk.Label(
-                label=f"×{m['count']}", css_classes=["pill"], valign=Gtk.Align.CENTER,
-                tooltip_text=f"Repeated {m['count']} times since {local(m['first_ts'], '%b %d %H:%M:%S')}",
-            ))
-        self.set_child(box)
-
-    def update_age(self):
-        m = self.event
-        self.meta.set_label(f"{LABEL.get(m['source'], m['source'])} · {local(m['ts'], '%H:%M')} · {ago(m['ts'])}")
+            top.append(Gtk.Label(label=f"×{m['count']}", css_classes=["ev-count"]))
+        grid.attach(top, 2, 0, 1, 1)
+        grid.attach(Sparkline(hours or [0] * 24, m["severity"]), 2, 1, 1, 1)
+        self.set_tooltip_text(f"{readable(m['summary'])}\n{LABEL.get(m['source'], m['source'])} · {local(m['ts'], '%a %d %b, %H:%M:%S')} · {ago(m['ts'])}"
+                              + (f"\nRepeated {m['count']} times since {local(m['first_ts'], '%b %d %H:%M:%S')}" if m.get("count", 1) > 1 else ""))
+        self.set_child(grid)

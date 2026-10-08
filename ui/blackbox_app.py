@@ -22,10 +22,11 @@ class App(Adw.Application):
         Adw.Application.do_startup(self)
         provider = Gtk.CssProvider()
         provider.load_from_string(CSS)
-        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        if self.args.style:
-            scheme = Adw.ColorScheme.FORCE_DARK if self.args.style == "dark" else Adw.ColorScheme.FORCE_LIGHT
-            Adw.StyleManager.get_default().set_color_scheme(scheme)
+        # above USER: a ~/.config/gtk-4.0/gtk.css palette would otherwise recolour the design
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_USER + 1)
+        # the palette is dark only; --style light is left for testing the stock widgets
+        scheme = Adw.ColorScheme.FORCE_LIGHT if self.args.style == "light" else Adw.ColorScheme.FORCE_DARK
+        Adw.StyleManager.get_default().set_color_scheme(scheme)
 
     def do_activate(self):
         win = self.props.active_window
@@ -43,7 +44,7 @@ class App(Adw.Application):
                 # a headless display has no frame clock, so transitions would never finish
                 Gtk.Settings.get_default().set_property("gtk-enable-animations", False)
             # otherwise the first row takes the initial focus, and a focused row gets selected
-            win.set_focus(win.search_button)
+            win.set_focus(win.range)
         win.present()
 
 

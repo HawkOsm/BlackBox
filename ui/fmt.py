@@ -83,3 +83,43 @@ def field_value(key, value):
 def readable(summary):
     """Drops the long instance id of a templated unit: `systemd-coredump@13-3276…-0.service: x` -> `systemd-coredump: x`."""
     return re.sub(r"^([\w.-]+)@[^:\s]{12,}\.service: ", r"\1: ", summary)
+
+
+CUSTOM = re.compile(r"^(\S+) \((pid \d+)(?:, child of ([^)]+))?\) (.*)$")
+UNIT = re.compile(r"^([\w@.:\\-]+?): +(.*)$", re.S)
+AUDIT = re.compile(r"^(\w+) (?:from|failed for \S+ via|hit by) (\S+)(.*)$")
+AUDIT_WHAT = {"ANOM_ABEND": "crashed", "ANOM_PROMISCUOUS": "network card set to promiscuous mode",
+              "USER_AUTH": "authentication failed"}
+
+
+def split_summary(source, severity, summary):
+    """(name, description, detail): the three parts of an event row. The name is the process or
+    unit, the description what happened to it, the detail the reason or message."""
+    summary = readable(summary)
+    if source == "custom" and (m := CUSTOM.match(summary)):
+        comm, pid, parent, what = m.groups()
+        name = comm if comm != "?" else f"child of {parent}" if parent else "unknown process"
+        where = f"{pid}, child of {parent}" if parent else pid
+        if severity == "error" and what.startswith("killed by"):
+            return name, "crashed", f"{what} · {where}"
+        return name, what, where
+    if source == "journald" and (m := UNIT.match(summary)):
+        return m[1], "logged an error" if severity == "error" else "logged a warning" if severity == "warning" else "logged", m[2]
+    if source == "auditd":
+        if m := AUDIT.match(summary):
+            kind, exe, rest = m.groups()
+            if kind == "audit":
+                return exe.rsplit("/", 1)[-1], "hit an audit rule", summary
+            return exe.rsplit("/", 1)[-1], AUDIT_WHAT.get(kind, kind), f"{exe}{rest}"
+        return "audit", "", summary
+    if source == "packages" and (m := UNIT.match(summary)):
+        what, _, rest = m[2].partition(" · ")
+        return m[1], what, rest
+    if source == "sysstat":
+        part, _, rest = summary.partition(" ")
+        return {"cpu": "CPU", "gpu": "GPU", "mem": "Memory"}.get(part, part), rest, "a system sample over its limit"
+    if source == "boot":
+        if summary.startswith("System started"):
+            return "System started", "", summary.partition(", ")[2]
+        return "Unclean shutdown", "", summary
+    return summary, "", ""
