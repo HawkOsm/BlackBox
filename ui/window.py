@@ -3,14 +3,15 @@ from collections import deque
 from datetime import datetime, timezone
 from gtkenv import Adw, GLib, Gtk
 import data
-from consts import MOMENT_ICON, SOURCES
+from consts import RANGES, SOURCES
 from detail import DetailMixin
 from overview import OverviewMixin
+from processes import ProcessesMixin
 from refresh import RefreshMixin
 from sidebar import SidebarMixin
 
 
-class Window(Adw.ApplicationWindow, SidebarMixin, OverviewMixin, DetailMixin, RefreshMixin):
+class Window(Adw.ApplicationWindow, SidebarMixin, OverviewMixin, ProcessesMixin, DetailMixin, RefreshMixin):
     def __init__(self, app, db):
         super().__init__(application=app, title="Blackbox")
         self.set_default_size(1280, 820)
@@ -25,7 +26,8 @@ class Window(Adw.ApplicationWindow, SidebarMixin, OverviewMixin, DetailMixin, Re
         self.last_detail = {}
         self.window_secs = 120
         self.overview_at = 0
-        self.last_overview = None
+        self.counts = {}  # events per severity under the current filters
+        self.hourly = {}  # group key -> its last 24 hours, for the sparklines
         self.pending = deque()  # events fetched but not yet turned into rows
         self.fill_active = False
         self.cursor = None  # where the next older page starts; None when there is no more
@@ -37,7 +39,7 @@ class Window(Adw.ApplicationWindow, SidebarMixin, OverviewMixin, DetailMixin, Re
         self.refresh_busy = False
         self.refresh_force = False
 
-        self.split = Adw.NavigationSplitView(min_sidebar_width=340, max_sidebar_width=470, sidebar_width_fraction=0.36)
+        self.split = Adw.NavigationSplitView(min_sidebar_width=360, max_sidebar_width=360, sidebar_width_fraction=0.3)
         self.split.set_sidebar(self.build_sidebar())
         self.split.set_content(self.build_content())
         self.toasts = Adw.ToastOverlay(child=self.split)
@@ -47,31 +49,48 @@ class Window(Adw.ApplicationWindow, SidebarMixin, OverviewMixin, DetailMixin, Re
         narrow.add_setter(self.split, "collapsed", True)
         self.add_breakpoint(narrow)
 
+        slash = Gtk.ShortcutController(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        slash.add_shortcut(Gtk.Shortcut(trigger=Gtk.ShortcutTrigger.parse_string("slash"),
+                                        action=Gtk.CallbackAction.new(lambda *_: self.focus_search())))
+        self.add_controller(slash)
+
         self.refresh(force=True)
         GLib.timeout_add_seconds(5, self.refresh)
 
     def build_content(self):
-        view = Adw.ToolbarView()
-        header = Adw.HeaderBar()
-        self.copy_button = Gtk.Button(icon_name="edit-copy-symbolic", tooltip_text="Copy a text report of this moment", visible=False)
-        self.copy_button.connect("clicked", lambda *_: self.copy_report())
-        header.pack_end(self.copy_button)
-        header.pack_end(Gtk.MenuButton(icon_name=MOMENT_ICON, tooltip_text="Go to a time", popover=self.build_time_picker()))
+        view = Adw.ToolbarView(css_classes=["content-pane"])
+        header = Adw.HeaderBar(css_classes=["content-header"])
+        header.set_title_widget(Gtk.Box())
         self.overview_button = Gtk.Button(icon_name="go-previous-symbolic", tooltip_text="Back to the overview", visible=False)
         self.overview_button.connect("clicked", lambda *_: self.show_overview())
         header.pack_start(self.overview_button)
+        self.range = Adw.ToggleGroup(css_classes=["segmented", "range-switch"], valign=Gtk.Align.CENTER)
+        for label, hours in RANGES:
+            self.range.add(Adw.Toggle(name=str(hours), label=label))
+        self.range.set_active_name(str(self.hours))
+        self.range.connect("notify::active-name", self.on_range)
+        header.pack_start(self.range)
+        header.pack_end(Gtk.MenuButton(label="Go to a moment…", css_classes=["moment-button"], valign=Gtk.Align.CENTER,
+                                       popover=self.build_time_picker()))
+        self.copy_button = Gtk.Button(icon_name="edit-copy-symbolic", tooltip_text="Copy a text report of this moment", visible=False)
+        self.copy_button.connect("clicked", lambda *_: self.copy_report())
+        header.pack_end(self.copy_button)
         view.add_top_bar(header)
         self.banner = Adw.Banner(revealed=False)
         view.add_top_bar(self.banner)
 
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
-        self.overview_scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
         self.detail_scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
-        self.stack.add_named(self.overview_scroll, "overview")
+        self.stack.add_named(self.build_overview(), "overview")
         self.stack.add_named(self.detail_scroll, "detail")
         view.set_content(self.stack)
         self.content_page = Adw.NavigationPage(title="Overview", tag="detail", child=view)
         return self.content_page
+
+    def on_range(self, group, _param):
+        name = group.get_active_name()
+        self.hours = None if name == "None" else int(name)
+        self.refresh(force=True)
 
     def build_time_picker(self):
         now = datetime.now()

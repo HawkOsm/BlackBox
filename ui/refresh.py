@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from gtkenv import Adw, GLib
 import data
-from consts import MAX_ROWS, PAGE_ROWS, SCOPES
+from consts import MAX_ROWS, PAGE_ROWS, SCOPES, SIZE_CAP
 from widgets import EventRow
 
 FILL_CHUNK = 30  # rows built per idle callback
@@ -50,9 +50,12 @@ class RefreshMixin:
         try:
             result = {"summary": self.db.summary()}
             if want_rows:
+                severities, sources, text, since = query
                 result["page"] = self.db.messages_page(*query, size=PAGE_ROWS)
+                result["counts"] = self.db.counts(sources, text, since)
+                result["hourly"] = self.db.hourly(severities, sources, text)
             if overview:
-                result["overview"] = self.db.overview_page(query[1])
+                result["overview"] = self.db.overview_page(self.hours, query[1])
         except (sqlite3.Error, OSError):
             result = None
         GLib.idle_add(self.apply_refresh, result, force)
@@ -64,23 +67,21 @@ class RefreshMixin:
             self.start_refresh()
             return GLib.SOURCE_REMOVE
         if result is None:
-            self.title.set_subtitle("Cannot read the database")
             self.banner.set_title("Cannot read the database. Is the collector installed and running?")
             self.banner.set_revealed(True)
             return GLib.SOURCE_REMOVE
         summary = self.last_summary = result["summary"]
         age = summary["sample_age_s"]
-        if age is not None and age < 45:
-            self.title.set_subtitle("Recording")
-            self.banner.set_revealed(False)
-        elif age is None:
-            self.title.set_subtitle("No data yet")
+        if age is None or age < 45:
             self.banner.set_revealed(False)
         else:
-            self.title.set_subtitle("Collector stopped?")
             self.banner.set_title(f"Nothing recorded for {max(age // 60, 1)} min. Is the collector running?")
             self.banner.set_revealed(True)
 
+        if "counts" in result:
+            self.counts = result["counts"]
+            self.hourly = result["hourly"]
+            self.set_scope_counts(self.counts)
         page = result.get("page")
         if page is not None:
             # rebuilt only when the rows change; "3 min ago" is refreshed in place
@@ -94,11 +95,9 @@ class RefreshMixin:
                 self.fill_list(page["rows"], replace=True)
                 if force:
                     self.list_scroll.get_vadjustment().set_value(0)
-            else:
-                self.update_ages()
         self.update_footer()
-        if "overview" in result and self.current is None:
-            self.render_overview(result["overview"], summary)
+        if "overview" in result:
+            self.render_overview(result["overview"])
         return GLib.SOURCE_REMOVE
 
     # ---- older pages, read while scrolling
@@ -141,10 +140,13 @@ class RefreshMixin:
         s = self.last_summary
         if s is None:
             return
-        more = ""
-        if self.cursor is not None:
-            more = "  ·  older events load as you scroll" if self.loaded_rows < MAX_ROWS else f"  ·  newest {self.loaded_rows} shown, narrow the range for more"
-        self.footer.set_label(f"{self.loaded_events} events{more}  ·  {s['errors_24h']} errors, {s['warnings_24h']} warnings in 24 h  ·  {s['db_bytes'] / 1e6:.1f} MB")
+        total = sum(self.counts.values())
+        size = s["db_bytes"] / 1e6
+        self.footer.set_label(f"{total:,} events · " + (f"{size / 1000:.1f} GB" if size >= 1000 else f"{size:.1f} MB"))
+        self.footer.set_tooltip_text(f"{self.loaded_events:,} of them in the list" + (
+            ", older ones load as you scroll" if self.cursor is not None and self.loaded_rows < MAX_ROWS else
+            f", the newest {self.loaded_rows} rows: narrow the range for more" if self.cursor is not None else ""))
+        self.footer_cap.set_label(f"of {SIZE_CAP}")
 
     # ---- building the rows
 
@@ -163,7 +165,8 @@ class RefreshMixin:
         for _ in range(FILL_CHUNK):
             if not self.pending:
                 break
-            self.list.append(EventRow(self.pending.popleft()))
+            m = self.pending.popleft()
+            self.list.append(EventRow(m, self.hourly.get(data.group_key(m))))
         self.sync_selection()
 
     def fill_idle(self):
@@ -173,12 +176,6 @@ class RefreshMixin:
         self.fill_active = False
         self.on_list_scroll(self.list_scroll.get_vadjustment())  # a short list may still need a page
         return GLib.SOURCE_REMOVE
-
-    def update_ages(self):
-        i = 0
-        while (row := self.list.get_row_at_index(i)) is not None:
-            row.update_age()
-            i += 1
 
     def sync_selection(self):
         if self.selected is None:

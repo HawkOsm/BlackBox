@@ -38,6 +38,11 @@ def epoch(ts):
 PID = re.compile(r"\bpid \d+")
 
 
+def group_key(r):
+    """What makes two events repeats of one another: same source, severity and text bar a pid."""
+    return r["source"], r["severity"], PID.sub("pid", r["summary"])
+
+
 def collapse(rows, window=600):
     """Folds repeats of the same message into one row with a count (rows arrive newest first).
     Messages that differ only in a pid count as the same, and a repeat joins its group even with
@@ -45,7 +50,7 @@ def collapse(rows, window=600):
     a login that runs the same failing helper 90 times shows up as one row, not 90."""
     out, open_groups = [], {}
     for r in rows:
-        key = (r["source"], r["severity"], PID.sub("pid", r["summary"]))
+        key = group_key(r)
         group = open_groups.get(key)
         if group and epoch(group["first_ts"]) - epoch(r["ts"]) <= window:
             group["count"] += 1
@@ -112,13 +117,6 @@ class Data:
             row = by_key.get(key(f["ts"]))
             if row is not None:
                 row[f["series"]] = f["value"]
-
-    def latest_sensors(self):
-        """Every sensor of the newest tick that is under five minutes old."""
-        return self.optional_rows(
-            "SELECT kind, name, value FROM sensors WHERE ts = (SELECT MAX(ts) FROM sensors WHERE ts >= datetime('now', '-5 minutes')) "
-            "ORDER BY kind, name"
-        )
 
     # INDEXED BY: left alone, SQLite walks the (source, ref_id) index and sorts every matching row
     # (0.9 s over 3 million rows); the ts index reads the newest rows in order and stops at the limit.
@@ -228,67 +226,94 @@ class Data:
         )
         return found[0]["message"] if found else None
 
-    def overview(self, hours=24):
-        """Load averaged into about 150 buckets, plus every notable event, for the last `hours`
-        (or since the first sample, when the recording is younger than that)."""
-        since = f"-{hours} hours"
-        first = self.rows("SELECT MIN(ts) AS ts FROM sysstat WHERE ts >= datetime('now', ?)", (since,))[0]["ts"]
-        span = time.time() - epoch(first) if first else hours * 3600
-        bucket_s = max(10, int(span / 150) // 10 * 10)
+    def glance(self, hours, sources, bars=48):
+        """Everything the overview chart draws for the last `hours` (None: since the first
+        sample): load and power averaged into about 150 buckets, error and warning counts in
+        `bars` equal slices, and the error-level boots and crashes that get a marker."""
+        now = time.time()
+        if hours is None:
+            first = self.rows("SELECT MIN(ts) AS ts FROM sysstat")[0]["ts"]
+            t0 = epoch(first) if first else now - 86400
+        else:
+            t0 = now - hours * 3600
+        since = time.strftime(FMT, time.gmtime(t0))
+        bucket_s = max(10, int((now - t0) / 150) // 10 * 10)
         load = self.rows(
             "SELECT MIN(ts) AS ts, AVG(cpu_pct) AS cpu_pct, AVG(mem_pct) AS mem_pct, AVG(gpu_pct) AS gpu_pct, "
             "AVG(gpu_temp) AS gpu_temp "
-            f"FROM sysstat WHERE ts >= datetime('now', ?) GROUP BY strftime('%s', ts) / {bucket_s} ORDER BY ts",
+            f"FROM sysstat WHERE ts >= ? GROUP BY strftime('%s', ts) / {bucket_s} ORDER BY ts",
             (since,),
         )
         power = self.optional_rows(
             "SELECT MIN(ts) AS ts, AVG(cpu_watt) AS cpu_watt, AVG(gpu_watt) AS gpu_watt, "
             "AVG(battery_watt) AS battery_watt, AVG(battery_pct) AS battery_pct "
-            f"FROM power WHERE ts >= datetime('now', ?) GROUP BY strftime('%s', ts) / {bucket_s} ORDER BY ts",
+            f"FROM power WHERE ts >= ? GROUP BY strftime('%s', ts) / {bucket_s} ORDER BY ts",
             (since,),
         )
-        found = self.sensor_series("ts >= datetime('now', ?)", (since,), bucket_s)
+        found = self.sensor_series("ts >= ?", (since,), bucket_s)
         self.merge_series(load, found, bucket_s)
         self.merge_series(power, found, bucket_s)
-        events = self.rows(
-            "SELECT ts, severity, summary FROM messages WHERE severity != 'info' AND ts >= datetime('now', ?) "
-            "ORDER BY ts DESC LIMIT 2000",
-            (since,),
-        )
-        return {"hours": hours, "bucket_s": bucket_s, "load": load, "power": power, "events": events}
+        counts = [{"error": 0, "warning": 0} for _ in range(bars)]
+        markers = []
+        if sources:
+            src = f"source IN ({','.join('?' * len(sources))})"
+            bar_s = (now - t0) / bars
+            for r in self.rows(
+                f"SELECT CAST((strftime('%s', ts) - ?) / ? AS INTEGER) AS i, severity, COUNT(*) AS n FROM messages "
+                f"WHERE severity IN ('error', 'warning') AND ts >= ? AND {src} GROUP BY i, severity",
+                (int(t0), bar_s, since, *sorted(sources)),
+            ):
+                counts[min(bars - 1, max(0, r["i"]))][r["severity"]] += r["n"]
+            markers = self.rows(
+                f"SELECT ts, summary FROM messages WHERE severity = 'error' AND source IN ('boot', 'custom') "
+                f"AND ts >= ? AND {src} ORDER BY ts DESC LIMIT 60",
+                (since, *sorted(sources)),
+            )
+        return {"t0": t0, "t1": now, "bucket_s": bucket_s, "load": load, "power": power,
+                "bars": counts, "markers": markers}
 
-    def overview_page(self, sources):
+    def overview_page(self, hours, sources):
         """Everything the overview shows, read in one go (it runs on the worker thread)."""
-        return {
-            "overview": self.overview(24),
-            "latest": self.messages({"error", "warning"}, sources, limit=6),
-            "gpu": self.last_gpu(),
-            "power": self.last_power(),
-            "sensors": self.latest_sensors(),
-        }
+        return {"glance": self.glance(hours, sources), "crashes": self.crashes()}
 
-    def last_power(self):
-        """The newest power state: battery from the newest row, CPU watts from the newest row that
-        has them (they are NULL while the RAPL counter is unreadable)."""
-        newest = self.optional_rows(
-            "SELECT ts, on_battery, battery_pct, battery_watt FROM power WHERE ts >= datetime('now', '-5 minutes') "
-            "ORDER BY power_id DESC LIMIT 1"
-        )
-        cpu = self.optional_rows(
-            "SELECT cpu_watt FROM power WHERE cpu_watt IS NOT NULL AND ts >= datetime('now', '-5 minutes') "
-            "ORDER BY power_id DESC LIMIT 1"
-        )
-        if not newest:
-            return None
-        return {**newest[0], "cpu_watt": cpu[0]["cpu_watt"] if cpu else None}
+    def crashes(self):
+        """{process name: (crash count, first ts)}: tags that tie a running process to the event list."""
+        out = {}
+        for r in self.rows(
+            "SELECT c.comm AS name, COUNT(*) AS n, MIN(c.ts) AS first FROM messages m JOIN custom c ON c.custom_id = m.ref_id "
+            "WHERE m.source = 'custom' AND m.severity = 'error' AND c.comm IS NOT NULL AND c.comm != '?' GROUP BY c.comm"
+        ) + self.rows(
+            "SELECT a.executable AS name, COUNT(*) AS n, MIN(a.ts) AS first FROM messages m JOIN auditd a ON a.audit_id = m.ref_id "
+            "WHERE m.source = 'auditd' AND m.severity = 'error' AND a.event_type = 'ANOM_ABEND' AND a.executable IS NOT NULL "
+            "GROUP BY a.executable"
+        ):
+            name = r["name"].rsplit("/", 1)[-1][:15]  # an executable's name as /proc/<pid>/comm has it
+            n, first = out.get(name, (0, r["first"]))
+            out[name] = (n + r["n"], min(first, r["first"]))
+        return out
 
-    def last_gpu(self):
-        """The newest GPU reading: the GPU is sampled every third tick, so the newest row often has none."""
-        found = self.rows(
-            "SELECT gpu_pct, gpu_temp FROM sysstat WHERE gpu_pct IS NOT NULL AND ts >= datetime('now', '-5 minutes') "
-            "ORDER BY sysstat_id DESC LIMIT 1"
-        )
-        return found[0] if found else None
+    def counts(self, sources, text, since):
+        """Events per severity under the current sources, search and range: the scope switch's numbers."""
+        found = self._filter({"error", "warning", "info"}, sources, text, since)
+        if found is None:
+            return {}
+        where, args = found
+        rows = self.rows(f"SELECT severity, COUNT(*) AS n FROM messages WHERE {' AND '.join(where)} GROUP BY severity", args)
+        return {r["severity"]: r["n"] for r in rows}
+
+    def hourly(self, severities, sources, text):
+        """{group key: [24 counts]}, oldest hour first: the last day of each folded row, for its sparkline."""
+        found = self._filter(severities, sources, text, time.strftime(FMT, time.gmtime(time.time() - 86400)))
+        if found is None:
+            return {}
+        where, args = found
+        now = time.time()
+        out = {}
+        for r in self.rows(f"SELECT source, severity, summary, ts FROM messages WHERE {' AND '.join(where)} LIMIT 200000", args):
+            hour = 23 - int((now - epoch(r["ts"])) // 3600)
+            if 0 <= hour < 24:
+                out.setdefault(group_key(r), [0] * 24)[hour] += 1
+        return out
 
     def summary(self):
         counts = self.rows(
