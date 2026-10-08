@@ -9,7 +9,7 @@ happening on the machine at the time.
 > GPU stats if `nvidia-smi` exists. Support for other distributions and package managers (apt, dnf)
 > is planned, and contributions are welcome.
 
-![The Blackbox app: recorded problems on the left; the last 24 hours on the right, with error and warning counts, current CPU, memory and GPU, a load chart and the latest problems](docs/screenshot.webp)
+![The Blackbox app: recorded problems on the left, each with a 24-hour sparkline; on the right the day at a glance, with events, usage, temperature and power on one time axis, and the running processes with pause, end task and force kill](docs/screenshot.webp)
 
 ## Why
 
