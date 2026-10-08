@@ -1,4 +1,6 @@
 use crate::database::{self, ProcSample, Sample};
+use crate::power::Power;
+use crate::sensors::Sensors;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -88,7 +90,7 @@ fn nvidia_asleep() -> bool {
 }
 
 /// Runs a command but gives up, killing it, after `limit`: a hung driver must not stall the sampler.
-fn output_within(cmd: &mut Command, limit: Duration) -> Option<std::process::Output> {
+pub(crate) fn output_within(cmd: &mut Command, limit: Duration) -> Option<std::process::Output> {
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -110,14 +112,15 @@ fn output_within(cmd: &mut Command, limit: Duration) -> Option<std::process::Out
     }
 }
 
-/// (gpu %, vram %, temp C) from nvidia-smi; None when absent, failing, or the card is asleep.
-fn read_gpu() -> Option<(f64, f64, f64)> {
+/// (gpu %, vram %, temp C, watts) from nvidia-smi; None when absent, failing, or the card is asleep.
+/// Watts is None on its own when the card does not report power.
+fn read_gpu() -> Option<(f64, f64, f64, Option<f64>)> {
     if nvidia_asleep() {
         return None;
     }
     let out = output_within(
         Command::new("nvidia-smi").args([
-            "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+            "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
             "--format=csv,noheader,nounits",
         ]),
         Duration::from_secs(5),
@@ -126,16 +129,21 @@ fn read_gpu() -> Option<(f64, f64, f64)> {
         return None;
     }
     let text = String::from_utf8(out.stdout).ok()?;
-    let v: Vec<f64> = text
+    // an unsupported field prints "[N/A]": parse each on its own so one cannot hide the others
+    let v: Vec<Option<f64>> = text
         .lines()
         .next()?
         .split(',')
-        .filter_map(|x| x.trim().parse().ok())
+        .map(|x| x.trim().parse().ok())
         .collect();
-    if v.len() != 4 || v[2] <= 0.0 {
+    if v.len() != 5 {
         return None;
     }
-    Some((v[0], 100.0 * v[1] / v[2], v[3]))
+    let (util, used, total, temp) = (v[0]?, v[1]?, v[2]?, v[3]?);
+    if total <= 0.0 {
+        return None;
+    }
+    Some((util, 100.0 * used / total, temp, v[4]))
 }
 
 /// The `n` processes using the most memory. RSS ranks them all (cheap); the accurate
@@ -224,6 +232,8 @@ pub fn start() {
         let mut prev = read_cpu().zip(read_disk_sectors());
         let mut last = Instant::now();
         let mut tick: u64 = 0;
+        let mut power = Power::new();
+        let mut sensors = Sensors::new();
         loop {
             std::thread::sleep(Duration::from_secs(INTERVAL_SECS));
             tick += 1;
@@ -252,6 +262,8 @@ pub fn start() {
                         gpu_mem_pct: gpu.map(|g| g.1),
                         gpu_temp: gpu.map(|g| g.2),
                     };
+                    database::add_power_event(ts, &power.sample(gpu.and_then(|g| g.3)));
+                    database::add_sensor_readings(ts, &sensors.read());
                     let alert = assess(&sample, cores);
                     database::add_sysstat_event(
                         ts,

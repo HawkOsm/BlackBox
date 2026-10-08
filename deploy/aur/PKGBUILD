@@ -44,9 +44,9 @@ package() {
     cd "$pkgname"
     install -Dm755 target/release/blackbox "$pkgdir/usr/bin/blackbox"
 
-    # viewer: the app imports data.py from its own directory
-    install -Dm644 ui/data.py "$pkgdir/usr/share/blackbox/ui/data.py"
-    install -Dm755 ui/blackbox_app.py "$pkgdir/usr/share/blackbox/ui/blackbox_app.py"
+    # viewer: the app imports its other modules from its own directory
+    install -Dm644 -t "$pkgdir/usr/share/blackbox/ui" ui/*.py
+    chmod 755 "$pkgdir/usr/share/blackbox/ui/blackbox_app.py"
 
     # the repo's unit and desktop file are written for ~/.local installs; point them at /usr
     install -d "$pkgdir/usr/lib/systemd/user"

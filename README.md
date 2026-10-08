@@ -27,6 +27,7 @@ costs so little that you never notice it running.
 |---|---|
 | **Processes** | Every crash (SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE, SIGTRAP, SIGSYS), named and with its stack trace from systemd-coredump, and every other failed exit (status 2 or higher), such as a Rust panic (101). A script stopped by Ctrl-C, `timeout` or systemd (130, 143, …) is not a failure and is skipped |
 | **System** | CPU, memory, disk I/O and load every 10 s, NVIDIA GPU load, memory and temperature every 30 s |
+| **Power and temperatures** | Every 10 s: battery state and draw, CPU package, cores, uncore, DRAM and whole-platform watts (RAPL), GPU watts, and every hwmon temperature and fan (CPU cores, NVMe drives, DRAM modules, Wi-Fi). CPU watts need one `sudo` step, which `deploy/install.sh` offers |
 | **journald** | Warnings and worse, plus Rust panics (which are logged at info level) |
 | **auditd** | Failed logins and authentication, sudo use, kernel module loads, edits to identity and boot files, audit anomalies |
 | **Packages** | Every pacman transaction, with kernel, driver and systemd upgrades listed first |
@@ -42,7 +43,7 @@ second of noise and would bury the few that matter.
  /proc, nvidia-smi ─────────────────────► sampler ──┤
  journalctl --follow ───────────────────► journald ─┼──► database.rs ──► blackbox.db ◄── Blackbox app
  audit.log ─────────────────────────────► auditd ───┤    one writer,      SQLite, WAL,   GTK4, read-only,
- pacman.log ────────────────────────────► pacman ───┤    one transaction  7.5 GB ring    runs only while
+ pacman.log ────────────────────────────► pacman ───┤    one transaction  50 GB ring     runs only while
  previous boot's last journal entry ────► boot ─────┘    per event        buffer         its window is open
 ```
 
@@ -73,7 +74,7 @@ What makes it both cheap and trustworthy:
   startup Blackbox reads the previous boot's last journal entry: a clean shutdown always ends with
   journald's "Journal stopped", so anything else is stored as an unclean end at the moment the log
   stopped.
-- **A size cap that never stalls the recorder.** The database is a ring buffer capped at 7.5 GB.
+- **A size cap that never stalls the recorder.** The database is a ring buffer capped at 50 GB.
   When it is full, the oldest tenth of the recorded time span is deleted from every table together,
   in chunks of 1,000 rows with the lock released in between. In the stress test, the worst write
   during a trim dropped from 1,217 ms (one big delete) to a few milliseconds (7.4 ms on this
@@ -132,7 +133,7 @@ Open **Blackbox** from the app menu. It only runs while its window is open.
 - The list shows problems grouped by day. Repeats of the same message fold into one row with a count
   (`×218`), even when only a pid differs.
 - Click any entry to see:
-  - a chart of CPU, memory and GPU around it (±2 min, ±10 min or ±1 h),
+  - charts of usage, temperature and power around it (±2 min, ±10 min or ±1 h),
   - a crash's stack trace,
   - the package changes from the week before,
   - every other event in that window.
@@ -157,7 +158,7 @@ Environment variables in `deploy/blackbox.service` (or the installed copy in `~/
 | Variable | Default | Meaning |
 |---|---|---|
 | `BLACKBOX_DB` | `~/.local/share/blackbox/blackbox.db` | database path |
-| `BLACKBOX_MAX_MB` | `7500` | database size cap |
+| `BLACKBOX_MAX_MB` | `50000` | database size cap |
 | `BLACKBOX_BATCH_MS` | `100` | how long process events may pile up before they are handled |
 | `BLACKBOX_AUDIT_LOG` | `/var/log/audit/audit.log` | audit log to follow |
 | `BLACKBOX_PACMAN_LOG` | `/var/log/pacman.log` | pacman log to read |
@@ -189,12 +190,14 @@ src/socket.rs      the raw netlink socket and the kernel-side BPF filter
 src/netlink.rs     netlink and connector message layout
 src/exit.rs        which exits are kept, and how they are described
 src/sampler.rs     CPU, memory, disk, load and GPU from /proc and nvidia-smi
+src/power.rs       battery state and CPU watts (RAPL) for the `power` table
+src/sensors.rs     every hwmon temperature, fan and power reading, and the other RAPL domains, for `sensors`
 src/journald.rs    follows journalctl
 src/auditd.rs      follows the audit log
 src/pacman.rs      package changes from /var/log/pacman.log
 src/boot.rs        each boot, and whether the previous one ended cleanly
 src/database.rs    schema, writes, ring-buffer trim
-ui/                the GTK4 app (blackbox_app.py) and its queries (data.py)
+ui/                the GTK4 app: blackbox_app.py starts it, window.py is the window, data.py the queries
 deploy/            installer, systemd unit, desktop entry, icon, audit rules
 docs/              architecture notes and the database diagram (database.drawio)
 ```

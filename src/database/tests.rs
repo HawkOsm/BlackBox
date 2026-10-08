@@ -92,6 +92,33 @@ fn write_and_trim() {
         None,
     );
 
+    add_power_event(
+        1_700_000_100,
+        &PowerSample {
+            on_battery: Some(true),
+            battery_pct: Some(62.0),
+            cpu_watt: Some(7.5),
+            gpu_watt: None,
+            battery_watt: Some(9.0),
+        },
+    );
+
+    add_sensor_readings(
+        1_700_000_100,
+        &[
+            crate::sensors::Reading {
+                kind: "temp",
+                name: "nvme[nvme0]/Composite".into(),
+                value: 36.0,
+            },
+            crate::sensors::Reading {
+                kind: "power",
+                name: "rapl/psys".into(),
+                value: 21.5,
+            },
+        ],
+    );
+
     let count = |table: &str| -> i64 {
         conn()
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
@@ -101,6 +128,8 @@ fn write_and_trim() {
     assert_eq!(count("messages"), 3000 + 1 + 1 + 1);
     assert_eq!(count("journald"), 1);
     assert_eq!(count("sysstat"), 1);
+    assert_eq!(count("power"), 1);
+    assert_eq!(count("sensors"), 2);
 
     let before = logical_size_bytes();
     let deleted = trim_to_budget(before / 2);
@@ -141,6 +170,9 @@ fn write_and_trim() {
     conn()
         .execute_batch("DELETE FROM custom; DELETE FROM messages; DELETE FROM journald;")
         .unwrap();
+    // every table and index costs a few pages even when empty; the budget below is half of the
+    // *data*, so adding a table to the schema must not change how many rows this test keeps
+    let empty = logical_size_bytes();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -166,7 +198,7 @@ fn write_and_trim() {
         "from 2100",
     );
     let before = logical_size_bytes();
-    trim_to_budget(before / 2);
+    trim_to_budget(empty + (before - empty) / 2);
     let recent: i64 = conn()
         .query_row("SELECT COUNT(*) FROM custom WHERE comm = 'test'", [], |r| {
             r.get(0)

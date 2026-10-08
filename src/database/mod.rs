@@ -3,9 +3,11 @@ mod boot;
 mod custom;
 mod journald;
 mod packages;
+mod power;
 mod procstat;
 mod retention;
 mod scheme;
+mod sensors;
 mod state;
 mod sysstat;
 
@@ -15,8 +17,10 @@ pub use boot::{Boot, add_boot_event, boot_recorded, mark_shutdown};
 pub use custom::{add_custom_event, name_crash};
 pub use journald::{Journal, add_journald};
 pub use packages::add_package_change;
+pub use power::{PowerSample, add_power_event};
 pub use procstat::{ProcSample, add_procstat};
 pub use retention::start_trim_thread;
+pub use sensors::add_sensor_readings;
 pub use state::{get_state, set_state};
 pub use sysstat::{Sample, add_sysstat_event};
 
