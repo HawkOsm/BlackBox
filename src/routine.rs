@@ -47,6 +47,19 @@ pub const JOURNAL: &[Rule] = &[
     any("Primary bus is hard wired to 0"),
     // bluetoothd trying to reconnect to a paired device that is switched off or out of range
     from("bluetooth.service", "Host is down"),
+    // bluetoothd's cached audio endpoint is gone after the device changed: it negotiates afresh
+    from("bluetooth.service", "Unable to load LastUsed: rseid"),
+    // a long-standing gnome-keyring quirk when an app looks up a secret it has already exported
+    any("asked to register item /org/freedesktop/secrets/"),
+    // Boot banners the kernel prints at warning level on every boot of such a machine. A module
+    // built outside the kernel tree (NVIDIA, VirtualBox, ZFS) taints it by definition.
+    any("loading out-of-tree module taints kernel"),
+    any("NVRM: loading NVIDIA UNIX"),
+    any("ENERGY_PERF_BIAS: Set to 'normal', was 'performance'"),
+    // a device tree or ACPI table names no regulator for a supply that is always on
+    any(" not found, using dummy regulator"),
+    // a laptop whose firmware hides the PS/2 mouse port because the touchpad is on I2C or SMBus
+    any("PS/2 appears to have AUX port disabled"),
 ];
 
 pub fn journal(unit: Option<&str>, message: &str) -> bool {
@@ -123,6 +136,7 @@ mod tests {
             Some("kernel"),
             "BUG: Bad page state in process swapper"
         ));
+        assert!(!journal(Some("kernel"), "x86/CPU: Running old microcode"));
         assert!(!journal(
             Some("wpa_supplicant.service"),
             "wlp0s20f3: nl80211: kernel reports: key not allowed"
