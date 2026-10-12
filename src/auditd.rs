@@ -1,4 +1,4 @@
-use crate::database;
+use crate::{database, routine};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -53,6 +53,22 @@ pub fn parse_line(line: &str) -> Option<AuditEvent> {
                 k.to_string(),
                 Some(("warning", format!("audit rule {k} hit by {via}"))),
             )
+        }
+        "ANOM_PROMISCUOUS" => {
+            // the kernel writes it with no pid or exe: the interface is what identifies it
+            let (dev, prom) = (field(line, "dev"), field(line, "prom"));
+            let sev = if routine::promiscuous(dev, prom) {
+                "info"
+            } else {
+                "error"
+            };
+            let left = if prom == Some("0") {
+                " (leaving it)"
+            } else {
+                ""
+            };
+            let text = format!("{kind} from {}{left}", dev.unwrap_or("?"));
+            (kind.to_string(), Some((sev, text)))
         }
         k if k.starts_with("ANOM_") || k == "AVC" => (
             k.to_string(),
@@ -211,6 +227,33 @@ mod tests {
         let line = r#"type=ANOM_ABEND msg=audit(1700000003.000:459): auid=1000 uid=1000 pid=555 comm="app" exe="/usr/bin/app" sig=11 res=1"#;
         let e = parse_line(line).unwrap();
         assert_eq!(e.alert.unwrap().0, "error");
+    }
+
+    #[test]
+    fn promiscuous_bridge_ports_are_routine() {
+        let line = |dev: &str, prom: u32| {
+            format!(
+                "type=ANOM_PROMISCUOUS msg=audit(1700000003.000:460): dev={dev} prom={prom} old_prom=0 auid=4294967295 uid=0 gid=0 ses=4294967295"
+            )
+        };
+        let docker = parse_line(&line("veth14fb608", 256))
+            .unwrap()
+            .alert
+            .unwrap();
+        assert_eq!(
+            docker,
+            ("info", "ANOM_PROMISCUOUS from veth14fb608".to_string())
+        );
+        let sniffer = parse_line(&line("physnic9", 256)).unwrap().alert.unwrap();
+        assert_eq!(sniffer.0, "error");
+        let left = parse_line(&line("physnic9", 0)).unwrap().alert.unwrap();
+        assert_eq!(
+            left,
+            (
+                "info",
+                "ANOM_PROMISCUOUS from physnic9 (leaving it)".to_string()
+            )
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod exit;
 mod journald;
 mod pacman;
 mod power;
+mod routine;
 mod sampler;
 mod sensors;
 

@@ -45,6 +45,35 @@ fn write_and_trim() {
         "the cursor write must not shift the row id"
     );
 
+    // a line stored as an error before a routine rule covered it is demoted, once
+    let probe =
+        "  alice : a password is required ; TTY=pts/0 ; PWD=/ ; USER=root ; COMMAND=/usr/bin/true";
+    add_journald(&Journal {
+        ts: 1_700_000_200,
+        priority: 1,
+        unit: Some("session-2.scope"),
+        pid: Some(6),
+        message: probe,
+        severity: None,
+        cursor: None,
+        dedup: false,
+    });
+    let severity_of = |text: &str| -> String {
+        conn()
+            .query_row(
+                "SELECT m.severity FROM messages m JOIN journald j ON m.ref_id = j.journald_id
+                 WHERE m.source = 'journald' AND j.message = ?1",
+                [text],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(severity_of(probe), "error");
+    demote_routine();
+    assert_eq!(severity_of(probe), "info");
+    assert_eq!(severity_of("boom"), "error", "unrelated lines keep theirs");
+    assert!(get_state("journald.routine").is_some());
+
     // crashes in the last seconds before a clean shutdown are shutdown noise
     add_custom_event(
         1_700_050_000,
@@ -125,8 +154,8 @@ fn write_and_trim() {
             .unwrap()
     };
     assert_eq!(count("custom"), 3000 + 1); // + the shutdown-noise crash
-    assert_eq!(count("messages"), 3000 + 1 + 1 + 1);
-    assert_eq!(count("journald"), 1);
+    assert_eq!(count("messages"), 3000 + 1 + 2 + 1); // + two journal lines
+    assert_eq!(count("journald"), 2);
     assert_eq!(count("sysstat"), 1);
     assert_eq!(count("power"), 1);
     assert_eq!(count("sensors"), 2);

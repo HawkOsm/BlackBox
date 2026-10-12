@@ -105,8 +105,14 @@ Two `journalctl --follow --output=json` processes:
   past the saved cursor, the follower forgets it and resumes by time.
 - **Clean text.** Terminal colour codes that some services log verbatim are stripped, and empty
   messages (the kernel logs bare continuation lines at error priority) are skipped.
-- **Routine noise.** A short list of messages that look alarming but are routine here (the kernel's
-  "watchdog did not stop!" at every shutdown) is stored as `info` instead of an alert.
+- **Routine noise.** `src/routine.rs` lists messages that look alarming but are routine on any
+  Linux machine: the kernel's "watchdog did not stop!" at every shutdown, `sudo -n` probes (sudo
+  logs "a password is required" at alert level), password prompts that timed out or were
+  cancelled, and similar. They are stored as `info` instead of an alert. Each rule matches text
+  the emitting program always prints, never a user, host, device address or path, so it holds on
+  every machine; a fault of one machine is fixed there, not listed. When the list changes, rows
+  already stored are re-rated once at startup. On the development machine the first list moved
+  531 of 1,601 errors to `info`, 31% of the last week's.
 - systemd-coredump entries also name the matching crash in `custom` (see Process names above), and
   the viewer shows their stack trace next to the crash.
 
@@ -119,7 +125,7 @@ Follows the audit log with `tail -F` and keeps only low-volume, high-value recor
 | `USER_AUTH`, `USER_LOGIN`, `USER_ACCT` with `res=failed` | warning |
 | successful `USER_AUTH`, `USER_LOGIN`, `USER_CMD` (sudo) | row in `auditd`, no alert |
 | `SYSCALL` with a `bb_*` key (`deploy/blackbox.rules`) | warning; module loads in the first 3 minutes after boot are `info` (about 30 per boot, the kernel bringing up drivers) |
-| `ANOM_*` (crashes, promiscuous mode) and `AVC` denials | error |
+| `ANOM_*` (crashes, promiscuous mode) and `AVC` denials | error, except promiscuous mode on a bridge port (Docker, Podman, libvirt, VM taps) or leaving it, which is info |
 
 On restart it binary-searches the log for the first record newer than the last one stored and
 follows from there, so events during downtime are picked up without reading the whole file (records

@@ -90,12 +90,6 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Messages that look alarming but are routine here: stored, but not raised as problems.
-const ROUTINE: [&str; 1] = [
-    // the kernel prints this at every shutdown, when systemd hands the hardware watchdog back
-    "watchdog did not stop!",
-];
-
 #[derive(Clone, Copy)]
 struct Follower {
     name: &'static str,
@@ -118,6 +112,7 @@ const FOLLOWERS: [Follower; 2] = [
 ];
 
 pub fn start() {
+    database::demote_routine();
     for f in FOLLOWERS {
         std::thread::spawn(move || follow(f));
     }
@@ -173,7 +168,7 @@ fn follow(f: Follower) {
 }
 
 fn store(e: &Entry, f: Follower, key: &str, dedup: bool) {
-    let routine = ROUTINE.iter().any(|r| e.message.contains(r));
+    let routine = crate::routine::journal(e.unit.as_deref(), &e.message);
     database::add_journald(&Journal {
         ts: e.ts,
         priority: e.priority,

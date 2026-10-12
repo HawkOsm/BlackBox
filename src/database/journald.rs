@@ -62,3 +62,44 @@ pub fn add_journald(j: &Journal) {
         },
     );
 }
+
+/// Applies `routine::JOURNAL` to journal lines stored before a rule existed, so the history reads
+/// the same as new lines. It scans the whole table, so it runs only when the rules have changed.
+pub fn demote_routine() {
+    const KEY: &str = "journald.routine";
+    let rules = &crate::routine::JOURNAL;
+    let fingerprint: String = rules
+        .iter()
+        .map(|r| format!("{}\t{}\n", r.unit.unwrap_or(""), r.text))
+        .collect();
+    let mut guard = conn();
+    let result = (|| -> rusqlite::Result<usize> {
+        let tx = guard.transaction()?;
+        let done: Option<String> = tx
+            .query_row("SELECT value FROM state WHERE key = ?1", [KEY], |r| {
+                r.get(0)
+            })
+            .ok();
+        if done.as_deref() == Some(fingerprint.as_str()) {
+            return Ok(0);
+        }
+        let mut demoted = 0;
+        for r in rules.iter() {
+            demoted += tx.execute(
+                "UPDATE messages SET severity = 'info'
+                 WHERE source = 'journald' AND severity != 'info' AND ref_id IN (
+                     SELECT journald_id FROM journald
+                     WHERE instr(message, ?1) > 0 AND (?2 IS NULL OR unit = ?2))",
+                params![r.text, r.unit],
+            )?;
+        }
+        upsert_state(&tx, KEY, &fingerprint)?;
+        tx.commit()?;
+        Ok(demoted)
+    })();
+    match result {
+        Ok(0) => {}
+        Ok(n) => eprintln!("journald: {n} stored lines now count as routine"),
+        Err(e) => eprintln!("db write failed (journald routine): {e}"),
+    }
+}
