@@ -8,13 +8,13 @@
  journalctl --follow (warning+) ─────► journald ─┤
  journalctl --follow (panics) ───────► journald ─┼──► database.rs ──► blackbox.db ◄── Blackbox app
  tail -F /var/log/audit/audit.log ───► auditd ───┤   (one connection,   (SQLite,       (read only,
- /var/log/pacman.log (every 30 s) ───► pacman ───┤    WAL, one          50 GB ring)     only while open)
+ package history (every 30 s) ───────► packages ─┤    WAL, one          50 GB ring)     only while open)
  previous boot's last journal entry ─► boot ─────┘    transaction per
                                                       event)
 ```
 
 One process (`blackbox`, a systemd user service) runs the collector on the main thread, plus
-threads for the sampler, two journald followers, the auditd follower, the pacman reader, the trim
+threads for the sampler, two journald followers, the auditd follower, one reader per package manager found, the trim
 job, and a one-off boot check at startup. The viewer is a separate
 GTK app that opens the database read-only and never talks to the service.
 
@@ -57,7 +57,7 @@ Every sampler tick also writes one `power` row: `on_battery`, `battery_pct`, `cp
 `gpu_watt` and `battery_watt`. CPU watts are the difference of the RAPL package counter
 (`/sys/class/powercap/intel-rapl:0/energy_uj`) over the elapsed time, wrap-around included; a gap
 over 30 s (suspend) is dropped rather than averaged in. The counter is root-only, so
-`deploy/setup-sensors.sh` opens it to group `wheel`; without it `cpu_watt` stays NULL. `gpu_watt` is
+`deploy/setup-sensors.sh` opens it to the admin group (`wheel`, `adm` or `sudo`); without it `cpu_watt` stays NULL. `gpu_watt` is
 filled only on the ticks where `nvidia-smi` is polled. `battery_watt` is the whole machine's draw
 and is set only while discharging.
 
@@ -131,16 +131,35 @@ On restart it binary-searches the log for the first record newer than the last o
 follows from there, so events during downtime are picked up without reading the whole file (records
 that rotated into `audit.log.1` meanwhile are not). If the log is missing or unreadable it checks
 again every 30 s. `deploy/setup-auditd.sh` installs the
-rules, caps the log at 4 x 500 MB and makes it readable by group `wheel`.
+rules (only the watches whose paths exist on this machine), caps the log at 4 x 500 MB and makes it
+readable by the admin group: `wheel`, `adm` or `sudo`, whichever the user is in.
 
-### Package changes (`pacman.rs`)
+### Package changes (`packages/`)
 
-Reads `/var/log/pacman.log` and stores one row per transaction: the pacman command, every package
-changed, and a one-line summary with the packages that most often break a machine (kernel, NVIDIA,
-Mesa, systemd, glibc, mkinitcpio, GRUB, microcode, firmware) listed first, with their versions:
+Stores one row per transaction: the command, every package changed, and a one-line summary with the
+packages that most often break a machine (kernel, NVIDIA, Mesa, systemd, glibc, initramfs tools,
+GRUB, shim, microcode, firmware) listed first, with their versions:
 `pacman: upgraded 83, installed 1 · mesa 1:26.2.2-1 → 1:26.2.3-1, linux 7.2.4.arch1-2 → 7.2.6.arch2-1, …`.
-The log only changes while pacman runs, so it is checked every 30 s by size instead of being
-followed by a process. The first run imports the whole log (139 transactions on this machine).
+A reader runs for every history that exists. Each one turns its format into the same change lines
+(`upgraded name (old -> new)`):
+
+| Reader | History | End of a transaction |
+|---|---|---|
+| `pacman.rs` | `/var/log/pacman.log` | `transaction completed` / `failed` |
+| `apt.rs` | `/var/log/apt/history.log` (local time) | `End-Date:` |
+| `zypper.rs` | `/var/log/zypp/history` (local time) | the next `command` line, or 5 min without a new line |
+| `dnf.rs` | dnf5 `transaction_history.sqlite` or dnf4 `history.sqlite`, opened read-only | `dt_end` set |
+
+dnf5 writes no text log, and dnf4's `dnf.rpm.log` has no transaction boundaries, so dnf's history
+database is read instead. Both are world-readable. An upgrade is two rows there (the new version,
+and the one it replaced), which are paired back into one line. The text logs only change while the
+package manager runs, so they are checked every 30 s by size. The database is queried only when
+its modification time (or its `-wal` file's) changes.
+
+The first run imports the whole history (139 transactions on this machine). After a restart, each
+reader starts again from the newest second already stored for its manager, and skips any
+transaction already stored with the same time and changes. Two transactions in the same second
+(apt and dnf both produce them) are therefore neither lost nor stored twice.
 The viewer lists the transactions from the week before any event it shows.
 
 ### Boots (`boot.rs`)
@@ -238,6 +257,58 @@ See `docs/database.drawio`. `messages` is an alert index: one row per notable ev
 the full row in the matching source table through `(source, ref_id)`. That pointer is enforced by
 the application, not by a foreign key, because a foreign key cannot target several tables.
 
+## Planned: one writer thread
+
+Not built yet. Today every source both reads its input and writes the database itself: each
+`add_*` call takes the shared connection's lock and commits on its own, so the write policy
+(durability, batching, de-duplication) is spread over six threads. The plan separates the two jobs
+(producer–consumer):
+
+```
+ collector ─┐
+ sampler ───┤
+ journald ──┤   Write    ┌────────┐   one transaction per    ┌─────────────┐
+ auditd ────┼──────────► │ channel│ ───────────────────────► │ writer      │ ──► blackbox.db
+ packages ──┤  (enum)    └────────┘   drained burst          │ (owns the   │
+ boot ──────┘                                                │ connection) │
+                                                             └─────────────┘
+ sources' resume reads (last_ts, get_state, boot_recorded) ──► own read-only connection (WAL)
+ trim job ──► own connection, chunked deletes as now
+```
+
+- **Sources produce, one thread writes.** A source parses its input into a `Write` value and sends
+  it down a bounded channel; it never touches the write connection. `Write` is an enum with one
+  variant per kind of write, and the writer has the only `match` on it. That match is the one place
+  a new source adds its write. An enum fits here rather than a trait: every variant has exactly one
+  operation, "apply it", while new variants keep coming.
+- **Commits per burst, not per row, without waiting.** The writer blocks for one value, then takes
+  whatever else is already queued (`try_iter`) and commits it all in one transaction. A lone event
+  commits at once, as now, so `synchronous=FULL` still puts every event on disk before the next one
+  can be lost. A burst (a package history backfill, a crash cascade) costs one fsync instead of one
+  per row. A timed batch ("commit every 500 ms") was rejected: it would leave the last half second
+  in memory at exactly the moment a flight recorder is for.
+- **Writes that must be atomic travel together.** A variant carries everything that has to commit
+  together. `Journal` carries its cursor, so the row and the cursor still land in one transaction.
+  Updates are variants too (`NameCrash`, `MarkShutdown`, `DemoteRoutine`, `SetState`), so nothing
+  else writes.
+- **De-duplication moves into the writer.** A source cannot ask the database whether a value is
+  already stored while earlier values may still be queued, so the check for a package transaction
+  already stored runs in the writer, inside its transaction. A `manager` column on `packages` with
+  a unique index (`INSERT OR IGNORE`) would replace both the check and the `summary LIKE 'apt: %'`
+  lookup that resume uses today.
+- **Reads stay direct.** Resume points (`last_ts`, journal cursors, `boot_recorded`) are read once
+  per (re)start over a separate read-only connection, which WAL allows next to the writer.
+- **The trim job keeps its own connection.** Its deletes already run in 1,000-row chunks, so the
+  writer waits at most one chunk for SQLite's write lock (`busy_timeout`), as it waits for the
+  mutex today.
+- **Failure.** If the writer thread dies, sources would block on a full channel and record nothing
+  without saying so. The writer exits the process instead, and systemd restarts the service, as it
+  does when the collector's netlink read fails.
+
+What it buys: fewer fsyncs in bursts, no lock shared by six threads, and sources that can be tested
+by collecting their `Write`s from a channel, with no database. To check it pays off, count commits
+during a `pacman -Syu` and a first-run package import before and after the change.
+
 ## Design decisions
 
 | Decision | Reason |
@@ -249,8 +320,9 @@ the application, not by a foreign key, because a foreign key cannot target sever
 | No summary or roll-up table | An hourly exec and exit count catches almost nothing that load, auditd and journald do not. |
 | Own `/proc` sampler | Avoids a package and a second data format for the same numbers. |
 | Native GTK app, not a web page | It should exist only while open, with no server or browser. |
-| pacman log read every 30 s, not followed | It changes only while pacman runs. A size check costs nothing; a `tail` process would sit there all day. |
+| package history read every 30 s, not followed | It changes only while the package manager runs. A size check costs nothing; a `tail` process would sit there all day. |
 | Unclean shutdowns detected at the next boot | Nothing can record a freeze at the time it happens. The journal's last entry, read once per boot, is enough to tell. |
+| One writer thread, not one write path per source (planned) | Sources differ in everything except where their data goes, so the shared part is the writing. One thread owning the connection commits a burst in one transaction, and sources can be tested without a database. A `Source` trait over all six would only rename `start()`. |
 
 ## Reading an exit code
 
@@ -311,7 +383,7 @@ one core more).
 
 `cargo test` covers the journald and audit parsers (including the coredump fields, cursors and
 colour codes), the exit rule, the kernel filter against it for every wait status, naming a crash
-from its coredump entry, the pacman parser, clean and unclean boot endings, resuming the audit log
+from its coredump entry, the package history parsers and readers, clean and unclean boot endings, resuming the audit log
 after downtime, the journal cursor not shifting row ids, the database write path, and the ring-buffer
 trim, including one far-future row (without the cap, that test keeps 0 of 3,000 recent rows).
 Beyond that, the whole service was exercised against a throwaway database: a real crash, a real

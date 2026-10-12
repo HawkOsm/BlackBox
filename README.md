@@ -5,16 +5,16 @@ need after something goes wrong: crashes, error logs, failed logins, package upg
 system load. A desktop app shows any of those moments together with everything else that was
 happening on the machine at the time.
 
-> **Built for Arch Linux first.** It currently needs pacman, systemd and journald, and reads NVIDIA
-> GPU stats if `nvidia-smi` exists. Support for other distributions and package managers (apt, dnf)
-> is planned, and contributions are welcome.
+> **Runs on any systemd Linux.** It reads package history from pacman (Arch), apt (Debian, Ubuntu),
+> dnf (Fedora, RHEL, Rocky, Alma) and zypper (openSUSE), and CI builds and tests it on each of those
+> distributions. It needs systemd and journald, and reads NVIDIA GPU stats if `nvidia-smi` exists.
 
 ![The Blackbox app: recorded problems on the left, each with a 24-hour sparkline; on the right the day at a glance, with events, usage, temperature and power on one time axis, and the running processes with pause, end task and force kill](docs/screenshot.webp)
 
 ## Why
 
 When a desktop freezes, a program crashes or a login fails, the evidence is spread across the
-journal, the audit log, coredumps and pacman's log. By the time you go looking, part of it has
+journal, the audit log, coredumps and the package manager's log. By the time you go looking, part of it has
 usually rotated away, and nothing lines it up in time. So "what happened at 14:02, and what else was
 going on?" means an hour of `journalctl` and `grep`.
 
@@ -30,7 +30,7 @@ costs so little that you never notice it running.
 | **Power and temperatures** | Every 10 s: battery state and draw, CPU package, cores, uncore, DRAM and whole-platform watts (RAPL), GPU watts, and every hwmon temperature and fan (CPU cores, NVMe drives, DRAM modules, Wi-Fi). CPU watts need one `sudo` step, which `deploy/install.sh` offers |
 | **journald** | Warnings and worse, plus Rust panics (which are logged at info level) |
 | **auditd** | Failed logins and authentication, sudo use, kernel module loads, edits to identity and boot files, audit anomalies |
-| **Packages** | Every pacman transaction, with kernel, driver and systemd upgrades listed first |
+| **Packages** | Every pacman, apt, dnf or zypper transaction, with kernel, driver and systemd upgrades listed first |
 | **Boots** | Every boot, and any previous boot that ended without a clean shutdown (a freeze, a kernel panic, a power loss), placed at the moment it stopped |
 
 It deliberately does **not** record every fork, exec or clean exit. That would be about 100 events a
@@ -43,7 +43,7 @@ second of noise and would bury the few that matter.
  /proc, nvidia-smi ─────────────────────► sampler ──┤
  journalctl --follow ───────────────────► journald ─┼──► database.rs ──► blackbox.db ◄── Blackbox app
  audit.log ─────────────────────────────► auditd ───┤    one writer,      SQLite, WAL,   GTK4, read-only,
- pacman.log ────────────────────────────► pacman ───┤    one transaction  50 GB ring     runs only while
+ package history ───────────────────────► packages ─┤    one transaction  50 GB ring     runs only while
  previous boot's last journal entry ────► boot ─────┘    per event        buffer         its window is open
 ```
 
@@ -100,17 +100,34 @@ reclaim those pages at any time.
 
 ## Install
 
-You need `rust` (cargo), `sqlite`, and for the viewer `python-gobject`, `gtk4` and `libadwaita`:
+You need Rust 1.88 or newer, a C compiler and SQLite's development files. The viewer also needs
+PyGObject with GTK 4 and libadwaita. On a server without them, the viewer is skipped and the
+recorder still runs.
+
+| Distribution | Recorder | Viewer |
+|---|---|---|
+| Arch | `sudo pacman -S --needed rust sqlite` | `python-gobject gtk4 libadwaita` |
+| Debian, Ubuntu | `sudo apt install build-essential libsqlite3-dev`, Rust from [rustup](https://rustup.rs) (the packaged one is too old) | `python3-gi gir1.2-gtk-4.0 gir1.2-adw-1` |
+| Fedora, RHEL, Rocky, Alma | `sudo dnf install cargo gcc sqlite-devel` (or rustup if dnf's Rust is older than 1.88) | `python3-gobject gtk4 libadwaita` |
+| openSUSE | `sudo zypper install cargo gcc sqlite3-devel` | `python3-gobject typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1` |
 
 ```bash
-sudo pacman -S --needed rust sqlite python-gobject gtk4 libadwaita
 git clone https://github.com/HawkOsm/BlackBox.git
 cd BlackBox
 deploy/install.sh
 ```
 
-No sudo needed. It builds the release binary, starts the recorder as a systemd user service (it
-starts at boot, since lingering is enabled) and adds **Blackbox** to the application menu.
+No sudo needed. It checks the build tools first and, if any are missing, prints the install command
+for your distribution. It then builds the release binary, starts the recorder as a systemd user
+service (it starts at boot, since lingering is enabled), adds **Blackbox** to the application menu,
+and finishes with `blackbox --check`.
+
+To see what the recorder can read on this machine, and the one command that opens up each source it
+cannot, run this at any time:
+
+```bash
+deploy/install.sh check     # or: blackbox --check
+```
 
 For the auditd source (needs sudo once):
 
@@ -118,7 +135,14 @@ For the auditd source (needs sudo once):
 sudo bash deploy/setup-auditd.sh
 ```
 
-This installs the audit rules, caps the audit log at 2 GB and makes it readable by the `wheel` group.
+This installs auditd if it is missing, loads the audit rules, caps the audit log at 2 GB and makes it
+readable by your admin group: `wheel`, `adm` or `sudo`, whichever you are in (set `BLACKBOX_GROUP`
+to choose). The rules watch the boot files of every distribution (mkinitcpio, dracut,
+initramfs-tools, GRUB, systemd-boot), but only those that exist are loaded. To see what this machine
+would get, run `bash deploy/setup-auditd.sh --print-rules`.
+
+On Debian, a new user is not in a group that may read the system journal. `blackbox --check` says
+so, and `sudo usermod -aG systemd-journal $USER` (then log in again) fixes it.
 
 To remove everything, run `deploy/install.sh uninstall`. Add `--purge` to delete the recorded data
 too.
@@ -162,6 +186,11 @@ Environment variables in `deploy/blackbox.service` (or the installed copy in `~/
 | `BLACKBOX_BATCH_MS` | `100` | how long process events may pile up before they are handled |
 | `BLACKBOX_AUDIT_LOG` | `/var/log/audit/audit.log` | audit log to follow |
 | `BLACKBOX_PACMAN_LOG` | `/var/log/pacman.log` | pacman log to read |
+| `BLACKBOX_APT_LOG` | `/var/log/apt/history.log` | apt history to read |
+| `BLACKBOX_ZYPPER_LOG` | `/var/log/zypp/history` | zypper history to read |
+| `BLACKBOX_DNF_DB` | dnf5's, else dnf4's history database | dnf history database to read |
+
+Every package history that exists is read, so normally none of these need setting.
 
 A lower `BLACKBOX_BATCH_MS` names more short-lived processes at the cost of more wakeups: at 0 ms it
 is about 50 wakeups a second.
@@ -179,6 +208,8 @@ logs, crash dumps and keys.
 - A process that fails within ~100 ms of starting, without dumping core, usually has no name, only
   its parent's.
 - After downtime, audit records that rotated into `audit.log.1` in the meantime are missed.
+- A bare `dpkg -i` or `rpm -i` is not recorded: only apt and dnf write it to their history.
+- zypper logs an upgrade as an install of the new version, so its rows have no old version.
 - If the kernel's event queue overflows during a burst, events are dropped, and the recorder logs
   that it happened.
 
@@ -194,11 +225,14 @@ src/power.rs       battery state and CPU watts (RAPL) for the `power` table
 src/sensors.rs     every hwmon temperature, fan and power reading, and the other RAPL domains, for `sensors`
 src/journald.rs    follows journalctl
 src/auditd.rs      follows the audit log
-src/pacman.rs      package changes from /var/log/pacman.log
+src/packages/      package changes: pacman.rs, apt.rs, zypper.rs (text logs), dnf.rs (history database)
+src/check.rs       blackbox --check: what the recorder can see on this machine
 src/boot.rs        each boot, and whether the previous one ended cleanly
 src/database.rs    schema, writes, ring-buffer trim
 ui/                the GTK4 app: blackbox_app.py starts it, window.py is the window, data.py the queries
-deploy/            installer, systemd unit, desktop entry, icon, audit rules
+deploy/            installer, systemd unit, desktop entry, icon, audit rules; distro.sh holds what differs
+                   between distributions (admin group, package manager)
+.github/           CI: lint and tests, plus a build-and-test run inside each supported distribution
 docs/              architecture notes and the database diagram (database.drawio)
 ```
 
@@ -216,11 +250,19 @@ The tests cover:
 - the journald and audit parsers,
 - the exit rule, and the kernel filter against it for every wait status,
 - naming a crash from its coredump entry,
-- the pacman parser,
+- the pacman, apt and zypper parsers and the dnf4 and dnf5 history readers,
 - clean and unclean boot endings,
 - resuming the audit log after downtime,
 - the database write path,
 - the ring-buffer trim, including a row stamped far in the future.
+
+CI also runs `.github/scripts/distro-test.sh` inside Arch, Debian, Ubuntu, Fedora, Rocky Linux and
+openSUSE containers. It builds and tests there, installs a package, and checks that the recorder
+finds that package in the distribution's real history. To run it locally:
+
+```bash
+podman run --rm -v "$PWD:/src:Z,ro" -w /src -e CARGO_TARGET_DIR=/tmp/target debian:trixie bash .github/scripts/distro-test.sh
+```
 
 Screenshots also render headless: start `gtk4-broadwayd :7`, then run the app with
 `GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 GSK_RENDERER=cairo`.

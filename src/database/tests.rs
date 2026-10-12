@@ -45,6 +45,25 @@ fn write_and_trim() {
         "the cursor write must not shift the row id"
     );
 
+    // package transactions: found again by content, and resumed per package manager
+    let changes = "upgraded bash (1 -> 2)";
+    assert!(!package_change_exists(1_700_000_050, changes));
+    add_package_change(1_700_000_050, None, changes, "apt: upgraded 1 · bash");
+    add_package_change(
+        1_700_000_060,
+        None,
+        "removed x (1)",
+        "pacman: removed 1 · x",
+    );
+    assert!(package_change_exists(1_700_000_050, changes));
+    assert!(!package_change_exists(
+        1_700_000_050,
+        "upgraded bash (2 -> 3)"
+    ));
+    assert_eq!(last_package_ts("apt"), Some(1_700_000_050));
+    assert_eq!(last_package_ts("pacman"), Some(1_700_000_060));
+    assert_eq!(last_package_ts("dnf"), None);
+
     // a line stored as an error before a routine rule covered it is demoted, once
     let probe =
         "  alice : a password is required ; TTY=pts/0 ; PWD=/ ; USER=root ; COMMAND=/usr/bin/true";
@@ -154,7 +173,7 @@ fn write_and_trim() {
             .unwrap()
     };
     assert_eq!(count("custom"), 3000 + 1); // + the shutdown-noise crash
-    assert_eq!(count("messages"), 3000 + 1 + 2 + 1); // + two journal lines
+    assert_eq!(count("messages"), 3000 + 1 + 2 + 1 + 2); // + two journal lines, two package runs
     assert_eq!(count("journald"), 2);
     assert_eq!(count("sysstat"), 1);
     assert_eq!(count("power"), 1);

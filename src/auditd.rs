@@ -12,7 +12,7 @@ pub struct AuditEvent {
     pub alert: Option<(&'static str, String)>,
 }
 
-fn log_path() -> String {
+pub fn log_path() -> String {
     std::env::var("BLACKBOX_AUDIT_LOG").unwrap_or_else(|_| "/var/log/audit/audit.log".to_string())
 }
 

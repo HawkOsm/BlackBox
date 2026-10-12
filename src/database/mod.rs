@@ -16,7 +16,7 @@ pub use auditd::add_auditd_event;
 pub use boot::{Boot, add_boot_event, boot_recorded, mark_shutdown};
 pub use custom::{add_custom_event, name_crash};
 pub use journald::{Journal, add_journald, demote_routine};
-pub use packages::add_package_change;
+pub use packages::{add_package_change, last_package_ts, package_change_exists};
 pub use power::{PowerSample, add_power_event};
 pub use procstat::{ProcSample, add_procstat};
 pub use retention::start_trim_thread;

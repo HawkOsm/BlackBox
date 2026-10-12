@@ -38,6 +38,63 @@ jobs:
       - name: Tests
         run: cargo test --locked
 
+  msrv:
+    name: Rust ${{ matrix.toolchain }} (minimum supported)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # keep in step with rust-version in Cargo.toml; install.sh enforces the same floor
+        toolchain: ["1.88"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        run: cargo test --locked
+
+  distros:
+    # each distribution links its own SQLite and keeps package history its own way: build, test and
+    # read the real history inside each one (.github/scripts/distro-test.sh, also runnable locally)
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Arch Linux (pacman), image: "archlinux:latest" }
+          - { name: Debian 13 (apt), image: "debian:trixie" }
+          - { name: Ubuntu 24.04 (apt), image: "ubuntu:24.04" }
+          - { name: Fedora (dnf5), image: "fedora:latest" }
+          - { name: Rocky Linux 9 (dnf4), image: "rockylinux/rockylinux:9" }
+          - { name: openSUSE Tumbleweed (zypper), image: "opensuse/tumbleweed:latest" }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Tools to check out the repository
+        run: |
+          if command -v pacman; then pacman -Sy --noconfirm --needed git tar
+          elif command -v apt-get; then apt-get update -qq && apt-get install -y -qq git tar
+          elif command -v dnf; then dnf install -y -q git tar
+          elif command -v zypper; then zypper --non-interactive install git tar gzip
+          fi
+      - uses: actions/checkout@v7
+      - name: Build, test and read this distribution's package history
+        run: bash .github/scripts/distro-test.sh
+
+  shell:
+    name: Shell scripts (shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: shellcheck
+        # -x follows the `. distro.sh` the scripts share
+        run: shellcheck -x deploy/*.sh .github/scripts/*.sh
+
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest

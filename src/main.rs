@@ -1,10 +1,11 @@
 mod auditd;
 mod boot;
+mod check;
 mod collector;
 mod database;
 mod exit;
 mod journald;
-mod pacman;
+mod packages;
 mod power;
 mod routine;
 mod sampler;
@@ -13,16 +14,20 @@ mod sensors;
 const USAGE: &str = "\
 blackbox: records crashes, logs and system load into one SQLite file
 
-usage: blackbox [--help | --version]
+usage: blackbox [--help | --version | --check]
 
-Runs until stopped, normally as the systemd user service. Settings are
-environment variables: BLACKBOX_DB, BLACKBOX_MAX_MB, BLACKBOX_BATCH_MS,
-BLACKBOX_AUDIT_LOG, BLACKBOX_PACMAN_LOG. See the README for what each does.";
+Runs until stopped, normally as the systemd user service. --check reports what
+the recorder can see on this machine and how to open up what it cannot.
+
+Settings are environment variables: BLACKBOX_DB, BLACKBOX_MAX_MB,
+BLACKBOX_BATCH_MS, BLACKBOX_AUDIT_LOG, BLACKBOX_PACMAN_LOG, BLACKBOX_APT_LOG,
+BLACKBOX_ZYPPER_LOG, BLACKBOX_DNF_DB. See the README for what each does.";
 
 /// What to print, and with which exit code, when the arguments mean the recorder must not start.
+/// `--check` is not here: it has to look at the machine first.
 fn early_exit(args: &[String]) -> Option<(String, i32)> {
     match args.first().map(String::as_str) {
-        None => None,
+        None | Some("--check") => None,
         Some("-h" | "--help") => Some((USAGE.to_string(), 0)),
         Some("-V" | "--version") => Some((format!("blackbox {}", env!("CARGO_PKG_VERSION")), 0)),
         Some(other) => Some((
@@ -42,6 +47,10 @@ fn main() {
         }
         std::process::exit(code);
     }
+    if args.first().map(String::as_str) == Some("--check") {
+        check::run();
+        return;
+    }
     database::init_database();
     let max_mb: u64 = std::env::var("BLACKBOX_MAX_MB")
         .ok()
@@ -51,7 +60,7 @@ fn main() {
     sampler::start();
     journald::start();
     auditd::start();
-    pacman::start();
+    packages::start();
     boot::start();
     collector::build_collector();
 }
@@ -67,6 +76,11 @@ mod tests {
     #[test]
     fn no_arguments_starts_the_recorder() {
         assert!(early_exit(&[]).is_none());
+    }
+
+    #[test]
+    fn check_is_left_to_main() {
+        assert!(early_exit(&args(&["--check"])).is_none());
     }
 
     #[test]
