@@ -1,6 +1,6 @@
 # Maintainer: Osman Sahin Guler <osmansahinguler@gmail.com>
 pkgname=blackbox-git
-pkgver=0.2.0.r0.g0000000
+pkgver=0.3.0.r0.g0000000
 pkgrel=1
 pkgdesc='Flight recorder for a Linux desktop: crashes, logs, package upgrades and system load in one SQLite file'
 arch=('x86_64')
