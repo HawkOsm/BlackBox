@@ -67,5 +67,6 @@ while read -r _ path _; do
     [ -e "$path" ] || { echo "rule for missing path $path" >&2 && exit 1; }
 done < <(grep '^-w ' <<<"$rules")
 grep -q '^-a always,exit -F arch=b64' <<<"$rules"
-echo "admin group here: $(bb_admin_group 2>/dev/null || echo none)"
+# no user given: the first admin group that exists here
+echo "admin group here: $(bb_admin_group "" 2>/dev/null || echo none)"
 endgroup

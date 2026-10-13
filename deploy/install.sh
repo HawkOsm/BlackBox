@@ -89,8 +89,13 @@ install_viewer() {
     chmod 755 "$DATA/ui/blackbox_app.py"
     install -m644 "$REPO/deploy/io.github.hawkosm.Blackbox.svg" "$ICONS/io.github.hawkosm.Blackbox.svg"
     sed "s|@HOME@|$HOME|g" "$REPO/deploy/io.github.hawkosm.Blackbox.desktop" > "$APPS/io.github.hawkosm.Blackbox.desktop"
-    command -v update-desktop-database >/dev/null && update-desktop-database "$APPS" || true
-    command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+    # refresh the menu and the icon cache where the tools exist; a failure there is not an install failure
+    if command -v update-desktop-database >/dev/null; then
+        update-desktop-database "$APPS" || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null; then
+        gtk-update-icon-cache -q -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+    fi
 }
 
 case "$ACTION" in
