@@ -6,7 +6,7 @@
 //! An upgrade is two rows there, the new version and the one it replaced; they are paired back into
 //! one `upgraded name (old -> new)` line.
 
-use super::{Manager, Transaction, store, stored_until};
+use super::{History, Transaction};
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -171,30 +171,48 @@ fn modified(path: &str) -> Option<SystemTime> {
         .max()
 }
 
-pub fn follow(m: &Manager) {
-    let mut since = stored_until(m.name());
-    let mut seen: Option<SystemTime> = None;
-    let mut failed = false;
-    loop {
-        let now = modified(&m.path);
-        if now.is_some() && now != seen {
-            match transactions(&m.path, since) {
-                Ok(found) => {
-                    for t in &found {
-                        store(m.name(), t);
-                        since = since.max(t.ts);
-                    }
-                    seen = now;
-                    failed = false;
-                }
-                Err(e) if !failed => {
-                    eprintln!("packages: cannot read {}: {e}", m.path);
-                    failed = true;
-                }
-                Err(_) => {}
-            }
+/// dnf's history database, read again only when it (or its `-wal` file) has changed.
+pub struct Dnf {
+    path: String,
+    since: i64,
+    seen: Option<SystemTime>,
+}
+
+impl Dnf {
+    pub fn new(path: String, since: i64) -> Self {
+        Dnf {
+            path,
+            since,
+            seen: None,
         }
-        std::thread::sleep(super::POLL);
+    }
+}
+
+impl History for Dnf {
+    fn name(&self) -> &'static str {
+        "dnf"
+    }
+
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn poll(&mut self) -> Result<Vec<Transaction>, String> {
+        let now = modified(&self.path);
+        if now.is_none() || now == self.seen {
+            return Ok(Vec::new());
+        }
+        let found = transactions(&self.path, self.since).map_err(|e| e.to_string())?;
+        // only once read: a failed read is tried again at the next check
+        self.seen = now;
+        if let Some(newest) = found.iter().map(|t| t.ts).max() {
+            self.since = self.since.max(newest);
+        }
+        Ok(found)
+    }
+
+    fn history(&self) -> Result<Vec<Transaction>, String> {
+        transactions(&self.path, i64::MIN).map_err(|e| e.to_string())
     }
 }
 
@@ -249,6 +267,55 @@ mod tests {
             ["upgraded glib2 (2.88.3-1.fc44 -> 2.88.4-1.fc44)"]
         );
         assert_eq!(read(&c, 150).unwrap().len(), 1, "only from `since` on");
+    }
+
+    #[test]
+    fn dnf_is_read_again_only_when_its_database_changes() {
+        let path = std::env::temp_dir().join(format!("bb_dnf_{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch(DNF5_SCHEMA).unwrap();
+        let add = |id: i64, ts: i64, name: &str| {
+            // mtimes are coarse: let the clock move before a change, so it shows
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            c.execute_batch(&format!(
+                "INSERT INTO pkg_name VALUES ({id}, '{name}');
+                 INSERT INTO rpm VALUES ({id}, {id}, 0, '1.0', '1.fc44');
+                 INSERT INTO trans VALUES ({id}, {ts}, {ts}, 'dnf install {name}', 2);
+                 INSERT INTO trans_item VALUES ({id}, {id}, {id}, 1);"
+            ))
+            .unwrap();
+        };
+        let names = |found: Vec<Transaction>| -> Vec<String> {
+            found.into_iter().flat_map(|t| t.changes).collect()
+        };
+        add(1, 100, "old");
+        add(2, 200, "stored");
+        // already stored up to 200: the run at 100 is not read again
+        let mut dnf = Dnf::new(path.to_string_lossy().into_owned(), 200);
+        assert_eq!(
+            names(dnf.poll().unwrap()),
+            ["installed stored (1.0-1.fc44)"]
+        );
+        assert!(dnf.poll().unwrap().is_empty(), "unchanged: not read");
+
+        add(3, 300, "new");
+        // the newest second already read comes again (the writer drops the repeat), older does not
+        assert_eq!(
+            names(dnf.poll().unwrap()),
+            [
+                "installed stored (1.0-1.fc44)",
+                "installed new (1.0-1.fc44)"
+            ]
+        );
+        assert!(dnf.poll().unwrap().is_empty(), "unchanged: not read");
+        add(4, 400, "newer");
+        assert_eq!(
+            names(dnf.poll().unwrap()),
+            ["installed new (1.0-1.fc44)", "installed newer (1.0-1.fc44)"],
+            "it moved on to the newest transaction it read"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
