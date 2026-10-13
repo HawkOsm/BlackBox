@@ -1,7 +1,9 @@
 //! `blackbox --check`: what the recorder can see on this machine, and the one step that fixes each
 //! source it cannot. Reads only; it never writes the database or starts a source.
 
-use crate::{auditd, database, packages};
+use crate::database;
+use crate::sources::follow::auditd;
+use crate::sources::poll::packages;
 use std::process::Command;
 
 fn os_name() -> String {

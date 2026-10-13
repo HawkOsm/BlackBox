@@ -1,15 +1,6 @@
-mod auditd;
-mod boot;
 mod check;
-mod collector;
 mod database;
-mod exit;
-mod journald;
-mod packages;
-mod power;
-mod routine;
-mod sampler;
-mod sensors;
+mod sources;
 
 const USAGE: &str = "\
 blackbox: records crashes, logs and system load into one SQLite file
@@ -52,17 +43,13 @@ fn main() {
         return;
     }
     database::init_database();
+    database::start_writer();
     let max_mb: u64 = std::env::var("BLACKBOX_MAX_MB")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(50_000);
     database::start_trim_thread(max_mb * 1_000_000);
-    sampler::start();
-    journald::start();
-    auditd::start();
-    packages::start();
-    boot::start();
-    collector::build_collector();
+    sources::run();
 }
 
 #[cfg(test)]
