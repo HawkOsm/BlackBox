@@ -1,8 +1,6 @@
-use crate::database::{self, Journal};
+//! One line of `journalctl --output=json`, read into an `Entry`.
+
 use serde_json::Value;
-use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
-use std::time::Duration;
 
 pub struct Entry {
     pub ts: i64,
@@ -36,9 +34,15 @@ pub fn text(v: &Value) -> Option<String> {
     }
 }
 
+/// When a journal entry was written, in epoch seconds (journald keeps microseconds).
+pub fn entry_ts(v: &Value) -> Option<i64> {
+    let micros: i64 = v.get("__REALTIME_TIMESTAMP")?.as_str()?.parse().ok()?;
+    Some(micros / 1_000_000)
+}
+
 pub fn parse_line(line: &str) -> Option<Entry> {
     let v: Value = serde_json::from_str(line).ok()?;
-    let micros: i64 = v.get("__REALTIME_TIMESTAMP")?.as_str()?.parse().ok()?;
+    let ts = entry_ts(&v)?;
     let priority: i32 = v.get("PRIORITY").and_then(text)?.parse().ok()?;
     let unit = ["_SYSTEMD_UNIT", "_SYSTEMD_USER_UNIT", "SYSLOG_IDENTIFIER"]
         .iter()
@@ -58,7 +62,7 @@ pub fn parse_line(line: &str) -> Option<Entry> {
             exe: v.get("COREDUMP_EXE").and_then(text),
         });
     Some(Entry {
-        ts: micros / 1_000_000,
+        ts,
         priority,
         unit,
         pid,
@@ -88,100 +92,6 @@ fn strip_ansi(s: &str) -> String {
         }
     }
     out
-}
-
-#[derive(Clone, Copy)]
-struct Follower {
-    name: &'static str,
-    filter: &'static [&'static str],
-    severity: Option<&'static str>,
-}
-
-const FOLLOWERS: [Follower; 2] = [
-    Follower {
-        name: "warnings",
-        filter: &["--priority=warning"],
-        severity: None,
-    },
-    // Rust panics are logged at info or notice, below the warning filter, but they are crashes.
-    Follower {
-        name: "panics",
-        filter: &["--priority=notice..info", "--grep=panicked at"],
-        severity: Some("error"),
-    },
-];
-
-pub fn start() {
-    database::demote_routine();
-    for f in FOLLOWERS {
-        std::thread::spawn(move || follow(f));
-    }
-}
-
-fn follow(f: Follower) {
-    let key = format!("journald.cursor.{}", f.name);
-    loop {
-        // Resume exactly after the last stored entry. Without a saved cursor (first run), resume
-        // by time: the overlapping second may hold entries already stored, so only those are
-        // checked for duplicates. Identical messages later on are real repeats and are kept.
-        let cursor = database::get_state(&key);
-        let since = database::last_ts("journald");
-        let overlap_until = since.as_deref().and_then(database::ts_epoch);
-        let resume = match (&cursor, &since) {
-            (Some(c), _) => format!("--after-cursor={c}"),
-            (None, Some(ts)) => format!("--since={ts} UTC"),
-            (None, None) => "--lines=0".to_string(),
-        };
-        let mut args = vec!["--follow", "--output=json", "--no-pager"];
-        args.extend_from_slice(f.filter);
-        args.push(&resume);
-        let mut lines = 0;
-        match Command::new("journalctl")
-            .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(mut child) => {
-                if let Some(out) = child.stdout.take() {
-                    for line in BufReader::new(out).lines().map_while(Result::ok) {
-                        lines += 1;
-                        if let Some(e) = parse_line(&line) {
-                            let dedup =
-                                cursor.is_none() && overlap_until.is_some_and(|t| e.ts <= t);
-                            store(&e, f, &key, dedup);
-                        }
-                    }
-                }
-                let _ = child.wait();
-            }
-            Err(e) => eprintln!("journalctl unavailable: {e}"),
-        }
-        // A following journalctl only ends by itself when it cannot use the cursor (the journal
-        // was vacuumed past it): forget it and resume by time instead.
-        if cursor.is_some() && lines == 0 {
-            eprintln!("journald: saved position is gone, resuming by time");
-            database::set_state(&key, None);
-        }
-        std::thread::sleep(Duration::from_secs(5));
-    }
-}
-
-fn store(e: &Entry, f: Follower, key: &str, dedup: bool) {
-    let routine = crate::routine::journal(e.unit.as_deref(), &e.message);
-    database::add_journald(&Journal {
-        ts: e.ts,
-        priority: e.priority,
-        unit: e.unit.as_deref(),
-        pid: e.pid,
-        message: &e.message,
-        severity: f.severity.or(routine.then_some("info")),
-        cursor: e.cursor.as_deref().map(|c| (key, c)),
-        dedup,
-    });
-    if let Some(c) = &e.coredump {
-        database::name_crash(e.ts, c.pid, c.comm.as_deref(), c.exe.as_deref());
-    }
 }
 
 #[cfg(test)]
