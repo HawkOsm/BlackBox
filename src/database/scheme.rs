@@ -1,6 +1,6 @@
 pub(super) const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS messages (
-        source   TEXT    NOT NULL,   -- 'journald' | 'auditd' | 'sysstat'
+        source   TEXT    NOT NULL,   -- the table of the row: 'custom', 'journald', 'auditd', 'sysstat', 'boot', 'packages'
         ref_id   INTEGER NOT NULL,   -- id of the row in that source's own table
         ts       TEXT    NOT NULL,   -- UTC 'YYYY-MM-DD HH:MM:SS'
         severity TEXT    NOT NULL,   -- 'error' | 'warning' | 'info'
