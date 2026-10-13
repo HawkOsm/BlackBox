@@ -41,15 +41,16 @@ second of noise and would bury the few that matter.
 ```
  kernel process events ──(BPF filter)──► collector ─┐
  /proc, nvidia-smi ─────────────────────► sampler ──┤
- journalctl --follow ───────────────────► journald ─┼──► database.rs ──► blackbox.db ◄── Blackbox app
- audit.log ─────────────────────────────► auditd ───┤    one writer,      SQLite, WAL,   GTK4, read-only,
+ journalctl --follow ───────────────────► journald ─┼──► writer ───────► blackbox.db ◄── Blackbox app
+ audit.log ─────────────────────────────► auditd ───┤    one thread,      SQLite, WAL,   GTK4, read-only,
  package history ───────────────────────► packages ─┤    one transaction  50 GB ring     runs only while
- previous boot's last journal entry ────► boot ─────┘    per event        buffer         its window is open
+ previous boot's last journal entry ────► boot ─────┘    per burst        buffer         its window is open
 ```
 
-One process (`blackbox`, a systemd user service) runs each source on its own thread and writes
-through a single database connection. The viewer is a separate app that only reads the database and
-never talks to the service.
+One process (`blackbox`, a systemd user service) runs each source on its own thread; sources hand
+what they find to one writer thread, which commits everything queued in one transaction, so a burst
+costs one disk sync instead of one per row. A source that crashes is restarted instead of going
+silent. The viewer is a separate app that only reads the database and never talks to the service.
 
 What makes it both cheap and trustworthy:
 
@@ -216,45 +217,49 @@ logs, crash dumps and keys.
 ## Repository
 
 ```
-src/collector.rs   process exits and crashes from the kernel (netlink process connector)
-src/socket.rs      the raw netlink socket and the kernel-side BPF filter
-src/netlink.rs     netlink and connector message layout
-src/exit.rs        which exits are kept, and how they are described
-src/sampler.rs     CPU, memory, disk, load and GPU from /proc and nvidia-smi
-src/power.rs       battery state and CPU watts (RAPL) for the `power` table
-src/sensors.rs     every hwmon temperature, fan and power reading, and the other RAPL domains, for `sensors`
-src/journald.rs    follows journalctl
-src/auditd.rs      follows the audit log
-src/packages/      package changes: pacman.rs, apt.rs, zypper.rs (text logs), dnf.rs (history database)
+src/main.rs        arguments, then start the database and every source
 src/check.rs       blackbox --check: what the recorder can see on this machine
-src/boot.rs        each boot, and whether the previous one ended cleanly
-src/database.rs    schema, writes, ring-buffer trim
+src/sources/       what the recorder watches, grouped by how the data arrives:
+  kernel/collector   process exits and crashes from the kernel (netlink process connector)
+  follow/journald    journal warnings and panics (journalctl --follow)
+  follow/auditd      the audit log (tail -F)
+  poll/sampler       CPU, memory, disk, load, GPU, power and every sensor, every 10 s
+  poll/packages      pacman, apt, zypper and dnf history, every 30 s
+  once/boot          each boot, and whether the previous one ended cleanly
+src/database/      the connection, the writer thread, the schema, the ring-buffer trim
+tests/             end-to-end tests of the real binary
 ui/                the GTK4 app: blackbox_app.py starts it, window.py is the window, data.py the queries
 deploy/            installer, systemd unit, desktop entry, icon, audit rules; distro.sh holds what differs
                    between distributions (admin group, package manager)
 .github/           CI: lint and tests, plus a build-and-test run inside each supported distribution
-docs/              architecture notes and the database diagram (database.drawio)
+docs/              how it works and why (see below)
 ```
+
+Each folder has a file of the same name next to it (`sources/follow.rs` beside `sources/follow/`)
+that says what the folder is for and lists its files.
+
+## Docs
+
+- [docs/architecture.md](docs/architecture.md): how it works, source by source, with measurements.
+- [docs/database.md](docs/database.md): every table and column, and how to query them.
+- [docs/development.md](docs/development.md): building, testing, running it against a throwaway
+  database, counting commits.
+- [docs/adding-a-source.md](docs/adding-a-source.md): the recipe for a new source, with a worked
+  example.
+- [docs/decisions/](docs/decisions/): the design decisions, with the options that lost.
 
 ## Develop
 
 ```bash
-cargo test && cargo clippy
+cargo fmt --check && cargo clippy --all-targets && cargo test
 cargo test --release trim_does_not_stall_writers -- --ignored --nocapture   # stress test
 python3 ui/blackbox_app.py --db some.sqlite --screenshot out.png --select-first
 python3 ui/blackbox_app.py --db some.sqlite --screenshot out.png --select 2 --style dark --size 400x760
 ```
 
-The tests cover:
-
-- the journald and audit parsers,
-- the exit rule, and the kernel filter against it for every wait status,
-- naming a crash from its coredump entry,
-- the pacman, apt and zypper parsers and the dnf4 and dnf5 history readers,
-- clean and unclean boot endings,
-- resuming the audit log after downtime,
-- the database write path,
-- the ring-buffer trim, including a row stamped far in the future.
+About 80 tests, each next to the code it tests, plus end-to-end tests of the real binary; what
+they cover, and the rule that a test must be seen to fail, are in
+[docs/development.md](docs/development.md).
 
 CI also runs `.github/scripts/distro-test.sh` inside Arch, Debian, Ubuntu, Fedora, Rocky Linux and
 openSUSE containers. It builds and tests there, installs a package, and checks that the recorder
