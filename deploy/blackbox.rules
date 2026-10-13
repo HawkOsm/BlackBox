@@ -1,14 +1,18 @@
 # Blackbox audit rules: low volume, high value. Everything is tagged bb_* so the
 # collector can pick these records out of the audit log.
+# deploy/setup-auditd.sh drops the watches on paths this machine does not have, so the list can
+# name the files of every distribution.
 
 # identity / privilege / auth configuration being changed
 -w /etc/passwd -p wa -k bb_identity
 -w /etc/shadow -p wa -k bb_identity
 -w /etc/group -p wa -k bb_identity
+-w /etc/gshadow -p wa -k bb_identity
 -w /etc/sudoers -p wa -k bb_identity
 -w /etc/sudoers.d/ -p wa -k bb_identity
 -w /etc/pam.d/ -p wa -k bb_identity
 -w /etc/ssh/sshd_config -p wa -k bb_identity
+-w /etc/ssh/sshd_config.d/ -p wa -k bb_identity
 
 # kernel modules loaded or removed
 -a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k bb_modules
@@ -16,11 +20,20 @@
 -a always,exit -F arch=b32 -S init_module,finit_module,delete_module -k bb_modules
 
 # boot and system configuration: the edits that stop a machine from booting. The kernel images in
-# /boot are left out on purpose: every upgrade rewrites them, and the pacman source records upgrades.
+# /boot are left out on purpose: every upgrade rewrites them, and the package source records upgrades.
 -w /etc/fstab -p wa -k bb_boot
+-w /etc/crypttab -p wa -k bb_boot
+-w /etc/modprobe.d/ -p wa -k bb_boot
+-w /etc/systemd/ -p wa -k bb_boot
+-w /etc/kernel/cmdline -p wa -k bb_boot
+# initramfs: mkinitcpio (Arch), dracut (Fedora, RHEL, openSUSE), initramfs-tools (Debian, Ubuntu)
 -w /etc/mkinitcpio.conf -p wa -k bb_boot
 -w /etc/mkinitcpio.d/ -p wa -k bb_boot
--w /etc/modprobe.d/ -p wa -k bb_boot
+-w /etc/dracut.conf -p wa -k bb_boot
+-w /etc/dracut.conf.d/ -p wa -k bb_boot
+-w /etc/initramfs-tools/ -p wa -k bb_boot
+# boot loaders: GRUB's settings and scripts, systemd-boot's entries
 -w /etc/default/grub -p wa -k bb_boot
+-w /etc/grub.d/ -p wa -k bb_boot
 -w /boot/loader/ -p wa -k bb_boot
--w /etc/systemd/ -p wa -k bb_boot
+-w /boot/efi/loader/ -p wa -k bb_boot

@@ -1,6 +1,6 @@
 pub(super) const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS messages (
-        source   TEXT    NOT NULL,   -- 'journald' | 'auditd' | 'sysstat'
+        source   TEXT    NOT NULL,   -- the table of the row: 'custom', 'journald', 'auditd', 'sysstat', 'boot', 'packages'
         ref_id   INTEGER NOT NULL,   -- id of the row in that source's own table
         ts       TEXT    NOT NULL,   -- UTC 'YYYY-MM-DD HH:MM:SS'
         severity TEXT    NOT NULL,   -- 'error' | 'warning' | 'info'
@@ -87,7 +87,7 @@ pub(super) const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS packages (
         package_id  INTEGER PRIMARY KEY,
         ts          TEXT    NOT NULL,
-        command     TEXT,              -- the pacman command line, when the log has it
+        command     TEXT,              -- the package manager's command line, when its history has it
         changes     TEXT    NOT NULL   -- one line per package: 'upgraded linux (6.9-1 -> 6.10-1)'
     );
     CREATE INDEX IF NOT EXISTS idx_packages_ts ON packages(ts);

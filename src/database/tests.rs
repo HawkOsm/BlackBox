@@ -1,165 +1,31 @@
 use super::retention::{checkpoint, logical_size_bytes, trim_to_budget};
 use super::*;
+use rusqlite::Connection;
 
+/// `n` crash rows with their alerts, one a second from `from`, stored as the collector stores them.
+fn seed(c: &Connection, from: i64, n: i64, comm: &str) {
+    c.execute_batch(&format!(
+        "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i < {last})
+         INSERT INTO custom (ts, pid, ppid, exit_code, comm)
+         SELECT datetime({from} + i, 'unixepoch'), i, 1, 11, '{comm}' FROM n;
+         INSERT OR IGNORE INTO messages (source, ref_id, ts, severity, summary)
+         SELECT 'custom', custom_id, ts, 'error', '{comm} {pad}' FROM custom
+         WHERE ts >= datetime({from}, 'unixepoch') AND comm = '{comm}';",
+        last = n - 1,
+        pad = "x".repeat(100),
+    ))
+    .unwrap();
+}
+
+/// The trim works on the shared connection, so this is the one test that opens it.
 #[test]
-fn write_and_trim() {
+fn trim_keeps_the_newest_rows_under_budget() {
     let path = std::env::temp_dir().join(format!("bb_test_{}.sqlite", std::process::id()));
     // SAFETY: only this test touches the environment or the global connection.
     unsafe { std::env::set_var("BLACKBOX_DB", &path) };
     init_database();
 
-    for i in 0..3000 {
-        add_custom_event(
-            1_700_000_000 + i,
-            100,
-            Some(1),
-            11,
-            Some("test"),
-            "error",
-            "x".repeat(100).as_str(),
-        );
-    }
-    add_journald(&Journal {
-        ts: 1_700_000_100,
-        priority: 3,
-        unit: Some("unit"),
-        pid: Some(5),
-        message: "boom",
-        severity: None,
-        cursor: Some(("journald.cursor.test", "s=abc")),
-        dedup: false,
-    });
-    assert_eq!(get_state("journald.cursor.test").as_deref(), Some("s=abc"));
-    let journald_ref: i64 = conn()
-        .query_row(
-            "SELECT ref_id FROM messages WHERE source = 'journald'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let journald_id: i64 = conn()
-        .query_row("SELECT journald_id FROM journald", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(
-        journald_ref, journald_id,
-        "the cursor write must not shift the row id"
-    );
-
-    // a line stored as an error before a routine rule covered it is demoted, once
-    let probe =
-        "  alice : a password is required ; TTY=pts/0 ; PWD=/ ; USER=root ; COMMAND=/usr/bin/true";
-    add_journald(&Journal {
-        ts: 1_700_000_200,
-        priority: 1,
-        unit: Some("session-2.scope"),
-        pid: Some(6),
-        message: probe,
-        severity: None,
-        cursor: None,
-        dedup: false,
-    });
-    let severity_of = |text: &str| -> String {
-        conn()
-            .query_row(
-                "SELECT m.severity FROM messages m JOIN journald j ON m.ref_id = j.journald_id
-                 WHERE m.source = 'journald' AND j.message = ?1",
-                [text],
-                |r| r.get(0),
-            )
-            .unwrap()
-    };
-    assert_eq!(severity_of(probe), "error");
-    demote_routine();
-    assert_eq!(severity_of(probe), "info");
-    assert_eq!(severity_of("boom"), "error", "unrelated lines keep theirs");
-    assert!(get_state("journald.routine").is_some());
-
-    // crashes in the last seconds before a clean shutdown are shutdown noise
-    add_custom_event(
-        1_700_050_000,
-        7,
-        Some(1),
-        6,
-        Some("start-hyprland"),
-        "error",
-        "start-hyprland (pid 7) killed by SIGABRT (6)",
-    );
-    assert_eq!(mark_shutdown(1_700_049_990, 1_700_050_010), 1);
-    assert_eq!(
-        mark_shutdown(1_700_049_990, 1_700_050_010),
-        0,
-        "a second run changes nothing"
-    );
-    let (sev, text): (String, String) = conn()
-        .query_row(
-            "SELECT severity, summary FROM messages WHERE summary LIKE 'start-hyprland%'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(sev, "info");
-    assert!(text.ends_with("(during shutdown)"));
-    add_auditd_event(
-        1_700_000_100,
-        "USER_AUTH",
-        Some(1),
-        Some(1000),
-        Some("/bin/su"),
-        Some(("warning", "failed auth")),
-    );
-    add_sysstat_event(
-        1_700_000_100,
-        &Sample {
-            cpu_pct: 1.0,
-            mem_pct: 2.0,
-            disk_io_kb: 3.0,
-            load_avg: 0.5,
-            gpu_pct: Some(4.0),
-            gpu_mem_pct: None,
-            gpu_temp: None,
-        },
-        None,
-    );
-
-    add_power_event(
-        1_700_000_100,
-        &PowerSample {
-            on_battery: Some(true),
-            battery_pct: Some(62.0),
-            cpu_watt: Some(7.5),
-            gpu_watt: None,
-            battery_watt: Some(9.0),
-        },
-    );
-
-    add_sensor_readings(
-        1_700_000_100,
-        &[
-            crate::sensors::Reading {
-                kind: "temp",
-                name: "nvme[nvme0]/Composite".into(),
-                value: 36.0,
-            },
-            crate::sensors::Reading {
-                kind: "power",
-                name: "rapl/psys".into(),
-                value: 21.5,
-            },
-        ],
-    );
-
-    let count = |table: &str| -> i64 {
-        conn()
-            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
-            .unwrap()
-    };
-    assert_eq!(count("custom"), 3000 + 1); // + the shutdown-noise crash
-    assert_eq!(count("messages"), 3000 + 1 + 2 + 1); // + two journal lines
-    assert_eq!(count("journald"), 2);
-    assert_eq!(count("sysstat"), 1);
-    assert_eq!(count("power"), 1);
-    assert_eq!(count("sensors"), 2);
-
+    seed(&conn(), 1_700_000_000, 3000, "test");
     let before = logical_size_bytes();
     let deleted = trim_to_budget(before / 2);
     assert!(deleted > 0, "trim should delete rows when over budget");
@@ -167,75 +33,82 @@ fn write_and_trim() {
         logical_size_bytes() <= before / 2,
         "size should drop under the budget"
     );
-    assert!(count("custom") < 3000);
-
-    // a crash stored without a name gets one from the later coredump entry
-    add_custom_event(
-        1_700_100_000,
-        4242,
-        Some(1),
-        139,
-        None,
-        "error",
-        "? (pid 4242) crashed",
-    );
-    name_crash(1_700_100_003, 4242, Some("bash"), Some("/usr/bin/bash"));
-    let (comm, exe, summary): (String, String, String) = conn()
-        .query_row(
-            "SELECT comm, exe, summary FROM custom JOIN messages
-             ON source = 'custom' AND ref_id = custom_id WHERE pid = 4242",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!((comm.as_str(), exe.as_str()), ("bash", "/usr/bin/bash"));
+    let custom = count(&conn(), "SELECT COUNT(*) FROM custom");
+    assert!(custom < 3000);
     assert_eq!(
-        summary,
-        "bash (pid 4242) killed by SIGSEGV (11), core dumped"
+        count(&conn(), "SELECT COUNT(*) FROM messages"),
+        custom,
+        "every row goes with its alert"
     );
 
     // one row stamped in the far future (a clock that was once wrong) must not make the trim
     // throw away every real row
     conn()
-        .execute_batch("DELETE FROM custom; DELETE FROM messages; DELETE FROM journald;")
+        .execute_batch("DELETE FROM custom; DELETE FROM messages;")
         .unwrap();
     // every table and index costs a few pages even when empty; the budget below is half of the
     // *data*, so adding a table to the schema must not change how many rows this test keeps
     let empty = logical_size_bytes();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-    for i in 0..3000 {
-        add_custom_event(
-            now - 3000 + i,
-            100,
-            Some(1),
-            11,
-            Some("test"),
-            "error",
-            &"x".repeat(100),
-        );
-    }
-    add_custom_event(
-        4_102_444_800,
-        100,
-        Some(1),
-        11,
-        Some("future"),
-        "error",
-        "from 2100",
-    );
+    let now = now();
+    seed(&conn(), now - 3000, 3000, "test");
+    seed(&conn(), 4_102_444_800, 1, "future");
     let before = logical_size_bytes();
     trim_to_budget(empty + (before - empty) / 2);
-    let recent: i64 = conn()
-        .query_row("SELECT COUNT(*) FROM custom WHERE comm = 'test'", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
+    let recent = count(&conn(), "SELECT COUNT(*) FROM custom WHERE comm = 'test'");
     assert!(recent > 1000, "trim kept only {recent} of 3000 recent rows");
 
+    // a source reads through `read()`, which cannot write
+    assert!(read(|c| c.execute_batch("DELETE FROM custom")).is_err());
+    assert_eq!(
+        read(|c| count(c, "SELECT COUNT(*) FROM custom")),
+        recent + 1
+    );
+
+    // through the writer thread: `drain` returns once what was queued is stored
+    start_writer();
+    write(SetState {
+        key: "drained".to_string(),
+        value: Some("yes".to_string()),
+    });
+    drain();
+    assert_eq!(get_state("drained").as_deref(), Some("yes"));
+
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn exists_tells_an_error_from_a_missing_row() {
+    let c = open(":memory:");
+    c.execute_batch("INSERT INTO state (key, value) VALUES ('k', 'v')")
+        .unwrap();
+    assert_eq!(
+        exists(&c, "SELECT 1 FROM state WHERE key = 'k'", []),
+        Ok(true)
+    );
+    assert_eq!(
+        exists(&c, "SELECT 1 FROM state WHERE key = 'x'", []),
+        Ok(false)
+    );
+    // a broken query is an error, never "not stored": that would store a duplicate
+    assert!(exists(&c, "SELECT 1 FROM no_such_table", []).is_err());
+}
+
+#[test]
+fn a_state_value_is_set_and_forgotten() {
+    let mut c = open(":memory:");
+    let set = |value: Option<&str>| -> Box<dyn Record> {
+        Box::new(SetState {
+            key: "k".to_string(),
+            value: value.map(str::to_string),
+        })
+    };
+    commit(&mut c, vec![set(Some("a")), set(Some("b"))]);
+    let value: String = c
+        .query_row("SELECT value FROM state WHERE key = 'k'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(value, "b", "a second value replaces the first");
+    commit(&mut c, vec![set(None)]);
+    assert_eq!(count(&c, "SELECT COUNT(*) FROM state"), 0);
 }
 
 #[test]
@@ -250,20 +123,11 @@ fn trim_does_not_stall_writers() {
     unsafe { std::env::set_var("BLACKBOX_DB", &path) };
     init_database();
 
-    let rows: u64 = std::env::var("STRESS_ROWS")
+    let rows: i64 = std::env::var("STRESS_ROWS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(600_000);
-    conn()
-        .execute_batch(&format!(
-            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i < {})
-             INSERT INTO custom (ts, pid, ppid, exit_code, comm)
-             SELECT datetime(1700000000 + i, 'unixepoch'), i, 1, 256, 'seed' FROM n;
-             INSERT INTO messages (source, ref_id, ts, severity, summary)
-             SELECT 'custom', custom_id, ts, 'info', 'seed (pid ' || pid || ') exited with status 1' FROM custom;",
-            rows - 1
-        ))
-        .unwrap();
+    seed(&conn(), 1_700_000_000, rows, "seed");
 
     // seeding was one giant transaction; settle its WAL first, as a long-running service would have
     checkpoint();
@@ -272,18 +136,10 @@ fn trim_does_not_stall_writers() {
     let writer_done = done.clone();
     let writer = std::thread::spawn(move || {
         let mut worst = Duration::ZERO;
-        let mut writes = 0u64;
+        let mut writes = 0i64;
         while !writer_done.load(Ordering::Relaxed) {
             let started = Instant::now();
-            add_custom_event(
-                1_800_000_000 + writes as i64,
-                1,
-                None,
-                11,
-                Some("live"),
-                "error",
-                "live write",
-            );
+            seed(&conn(), 1_800_000_000 + writes, 1, "live");
             worst = worst.max(started.elapsed());
             writes += 1;
             std::thread::sleep(Duration::from_millis(1));

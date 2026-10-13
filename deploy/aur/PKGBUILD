@@ -61,6 +61,7 @@ package() {
     # auditd source (optional, needs root once)
     install -Dm644 deploy/blackbox.rules "$pkgdir/usr/share/blackbox/blackbox.rules"
     install -Dm755 deploy/setup-auditd.sh "$pkgdir/usr/share/blackbox/setup-auditd.sh"
+    install -Dm644 deploy/distro.sh "$pkgdir/usr/share/blackbox/distro.sh"
 
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
     install -Dm644 docs/architecture.md "$pkgdir/usr/share/doc/$pkgname/architecture.md"

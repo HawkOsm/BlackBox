@@ -26,7 +26,7 @@ id_ed25519*
 secrets*
 
 # local tool and editor settings
-.claude/
+.claude/settings.local.json
 .vscode/
 .idea/
 *.swp

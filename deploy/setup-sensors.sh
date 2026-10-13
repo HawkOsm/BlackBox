@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Run with: sudo bash deploy/setup-sensors.sh
-# Opens the CPU energy counters (package, cores, uncore, DRAM, whole platform) to group wheel, the
-# group that already reads the audit log, so the collector can log watts without root. Since
-# Linux 5.10 they are root-only because fine-grained energy readings can leak data ("PLATYPUS").
+# Opens the CPU energy counters (package, cores, uncore, DRAM, whole platform) to your admin group
+# (wheel, adm or sudo, whichever you are in; set BLACKBOX_GROUP to choose), the group that also reads
+# the audit log, so the collector can log watts without root. Since Linux 5.10 they are root-only
+# because fine-grained energy readings can leak data ("PLATYPUS").
 # Skip this script and the watt readings are simply left out. Temperatures and fans need nothing.
 set -euo pipefail
 
-GROUP="${BLACKBOX_GROUP:-wheel}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=deploy/distro.sh
+. "$HERE/distro.sh"
+GROUP="$(bb_admin_group "${SUDO_USER:-}")" || exit 1
 
 cat > /etc/udev/rules.d/60-blackbox-rapl.rules <<RULES
 # installed by blackbox deploy/setup-sensors.sh
