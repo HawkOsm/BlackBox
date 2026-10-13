@@ -1,6 +1,8 @@
 //! What a process exit means. Shared by the collector, its kernel-side filter and the journald
 //! follower, so all three agree on which exits are worth keeping.
 
+use crate::database::Severity;
+
 /// Signals that mean the process crashed: they all dump core by default. SIGTERM, SIGHUP, SIGINT
 /// and SIGPIPE are routine shutdowns, and SIGKILL is mostly benign here (real OOM kills are logged
 /// by the kernel to journald).
@@ -20,16 +22,16 @@ const RUST_PANIC: u32 = 101;
 /// "not found", which on a desktop means hundreds of polling helpers a minute. Of 3,270 exits
 /// recorded on the development machine, status 0 and 1 were 99.7%; the other 11 were signal deaths
 /// and genuine failures.
-pub fn severity(exit_code: u32) -> Option<&'static str> {
+pub fn severity(exit_code: u32) -> Option<Severity> {
     let sig = exit_code & 0x7f;
     if sig != 0 {
-        return CRASH_SIGNALS.contains(&sig).then_some("error");
+        return CRASH_SIGNALS.contains(&sig).then_some(Severity::Error);
     }
     match (exit_code >> 8) & 0xff {
         0 | 1 => None,
         s if ROUTINE_STATUSES.contains(&s) => None,
-        RUST_PANIC => Some("error"),
-        _ => Some("warning"),
+        RUST_PANIC => Some(Severity::Error),
+        _ => Some(Severity::Warning),
     }
 }
 
@@ -80,19 +82,23 @@ mod tests {
     fn keeps_crashes_and_real_failures_only() {
         assert_eq!(severity(0), None);
         assert_eq!(severity(1 << 8), None, "status 1 is routine");
-        assert_eq!(severity(2 << 8), Some("warning"));
-        assert_eq!(severity(124 << 8), Some("warning"));
+        assert_eq!(severity(2 << 8), Some(Severity::Warning));
+        assert_eq!(severity(124 << 8), Some(Severity::Warning));
         assert_eq!(severity(143 << 8), None, "a shell reporting SIGTERM");
         assert_eq!(severity(130 << 8), None, "a shell reporting Ctrl-C");
         assert_eq!(
             severity(139 << 8),
-            Some("warning"),
+            Some(Severity::Warning),
             "a shell reporting SIGSEGV"
         );
-        assert_eq!(severity(101 << 8), Some("error"), "a Rust panic");
-        assert_eq!(severity(11), Some("error"));
-        assert_eq!(severity(11 | 0x80), Some("error"), "SIGSEGV with core");
-        assert_eq!(severity(31), Some("error"), "seccomp kill");
+        assert_eq!(severity(101 << 8), Some(Severity::Error), "a Rust panic");
+        assert_eq!(severity(11), Some(Severity::Error));
+        assert_eq!(
+            severity(11 | 0x80),
+            Some(Severity::Error),
+            "SIGSEGV with core"
+        );
+        assert_eq!(severity(31), Some(Severity::Error), "seccomp kill");
         assert_eq!(severity(9), None, "SIGKILL");
         assert_eq!(severity(15), None, "SIGTERM");
     }

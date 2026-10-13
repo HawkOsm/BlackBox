@@ -74,8 +74,8 @@ pub fn event_filter() -> Vec<libc::sock_filter> {
     const RET: u16 = 0x06;
     let insn = |code: u16, jt: u8, jf: u8, k: u32| libc::sock_filter { code, jt, jf, k };
 
-    let signals = crate::exit::CRASH_SIGNALS;
-    let routine = crate::exit::ROUTINE_STATUSES;
+    let signals = super::exit::CRASH_SIGNALS;
+    let routine = super::exit::ROUTINE_STATUSES;
     let first_signal = 11;
     let status = first_signal + signals.len();
     let accept = status + 2 + routine.len();
@@ -194,14 +194,7 @@ mod tests {
     }
 
     fn event(what: u32, pid: u32, tgid: u32, exit_code: u32) -> Vec<u8> {
-        let mut p = vec![0u8; 36];
-        p.extend(what.to_ne_bytes());
-        p.extend([0u8; 12]); // cpu, timestamp
-        p.extend(pid.to_ne_bytes());
-        p.extend(tgid.to_ne_bytes());
-        p.extend(exit_code.to_ne_bytes());
-        p.extend([0u8; 12]);
-        p
+        super::super::event::raw_event(what, pid, tgid, exit_code, 0)
     }
 
     #[test]
@@ -212,7 +205,7 @@ mod tests {
             let kept = run(&program, &event(exit, 7, 7, code)) != 0;
             assert_eq!(
                 kept,
-                crate::exit::severity(code).is_some(),
+                super::super::exit::severity(code).is_some(),
                 "wait status {code:#x}"
             );
         }
