@@ -1,4 +1,4 @@
-use crate::database::PowerSample;
+use super::store::PowerSample;
 use std::time::{Duration, Instant};
 
 const RAPL: &str = "/sys/class/powercap/intel-rapl:0";

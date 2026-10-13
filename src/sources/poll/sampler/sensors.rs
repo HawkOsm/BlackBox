@@ -1,4 +1,4 @@
-use crate::power::watts;
+use super::power::watts;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
