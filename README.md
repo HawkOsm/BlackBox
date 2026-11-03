@@ -1,6 +1,6 @@
 # Blackbox
 
-**A flight recorder for a Linux desktop.** A small Rust service runs all the time and keeps what you
+**An error logger for a Linux desktop.** A small Rust service runs all the time and keeps what you
 need after something goes wrong: crashes, error logs, failed logins, package upgrades, freezes and
 system load. A desktop app shows any of those moments together with everything else that was
 happening on the machine at the time.
@@ -70,7 +70,7 @@ What makes it both cheap and trustworthy:
   binary-searches the audit log for the first record it has not stored yet.
 - **Writes that survive a hard freeze.** SQLite runs in WAL mode with `synchronous=FULL`, so every
   event is on disk before the next one. With the usual `NORMAL`, the last ~30 s would sit in the page
-  cache and die with the machine, and those seconds are exactly what a flight recorder is for.
+  cache and die with the machine, and those seconds are exactly the ones you need.
 - **Freezes are detected at the next boot.** Nothing can write while the machine is frozen. At
   startup Blackbox reads the previous boot's last journal entry: a clean shutdown always ends with
   journald's "Journal stopped", so anything else is stored as an unclean end at the moment the log
