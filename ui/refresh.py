@@ -9,6 +9,7 @@ are read as the list is scrolled towards its end, up to MAX_ROWS rows."""
 import sqlite3
 import threading
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from gtkenv import Adw, GLib
 import data
@@ -57,6 +58,11 @@ class RefreshMixin:
             if overview:
                 result["overview"] = self.db.overview_page(self.hours, query[1])
         except (sqlite3.Error, OSError):
+            result = None
+        except Exception:
+            # A bug, not an unreadable database. It must still reach apply_refresh, or
+            # refresh_busy stays True and the window never refreshes again.
+            traceback.print_exc()
             result = None
         GLib.idle_add(self.apply_refresh, result, force)
 
@@ -116,6 +122,9 @@ class RefreshMixin:
         try:
             page = self.db.messages_page(*query, before=cursor, size=PAGE_ROWS)
         except (sqlite3.Error, OSError):
+            page = None
+        except Exception:
+            traceback.print_exc()  # as in fetch: still hand back, or refresh_busy sticks
             page = None
         GLib.idle_add(self.apply_more, page)
 
