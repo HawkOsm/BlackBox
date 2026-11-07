@@ -115,6 +115,12 @@ def split_summary(source, severity, summary):
     if source == "packages" and (m := UNIT.match(summary)):
         what, _, rest = m[2].partition(" · ")
         return m[1], what, rest
+    if source == "spikes":
+        what, _, procs = summary.partition(" · ")
+        return "CPU", f"temperature spike, {what.removeprefix('cpu ')}", procs or "no process was busy"
+    if source == "profiles":
+        daemon, _, change = summary.partition(" profile: ")
+        return daemon, "switched profile" if "→" in change else "profile", change
     if source == "sysstat":
         part, _, rest = summary.partition(" ")
         return {"cpu": "CPU", "gpu": "GPU", "mem": "Memory"}.get(part, part), rest, "a system sample over its limit"

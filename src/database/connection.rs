@@ -49,7 +49,7 @@ pub(crate) fn open(path: &str) -> Connection {
     conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;")
         .unwrap();
     conn.execute_batch(SCHEMA).unwrap();
-    for column in ["gpu_pct", "gpu_mem_pct", "gpu_temp"] {
+    for column in ["gpu_pct", "gpu_mem_pct", "gpu_temp", "cpu_mhz", "gpu_mhz"] {
         ensure_column(&conn, "sysstat", column, "REAL");
     }
     ensure_column(&conn, "custom", "exe", "TEXT");

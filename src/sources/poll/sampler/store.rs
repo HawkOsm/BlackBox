@@ -22,6 +22,10 @@ pub struct Sample {
     pub gpu_pct: Option<f64>,
     pub gpu_mem_pct: Option<f64>,
     pub gpu_temp: Option<f64>,
+    /// The fastest core at the sample's instant.
+    pub cpu_mhz: Option<f64>,
+    /// The GPU's graphics clock, with the other GPU fields.
+    pub gpu_mhz: Option<f64>,
 }
 
 /// One reading of the power state. Every field is optional: a desktop has no battery, and RAPL
@@ -74,11 +78,12 @@ impl Record for Tick {
         // last: its alert takes the row id from the last insert
         let s = &self.sample;
         c.execute(
-            "INSERT INTO sysstat (ts, cpu_pct, mem_pct, disk_io_kb, load_avg, gpu_pct, gpu_mem_pct, gpu_temp)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO sysstat (ts, cpu_pct, mem_pct, disk_io_kb, load_avg, gpu_pct, gpu_mem_pct, gpu_temp,
+                                  cpu_mhz, gpu_mhz)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 ts, s.cpu_pct, s.mem_pct, s.disk_io_kb, s.load_avg, s.gpu_pct, s.gpu_mem_pct,
-                s.gpu_temp
+                s.gpu_temp, s.cpu_mhz, s.gpu_mhz
             ],
         )?;
         let alert = self.alert.as_ref().map(|(sev, text)| (*sev, text.as_str()));
@@ -112,6 +117,8 @@ mod tests {
                 gpu_pct: Some(4.0),
                 gpu_mem_pct: None,
                 gpu_temp: None,
+                cpu_mhz: Some(4200.0),
+                gpu_mhz: None,
             },
             alert: Some((Severity::Error, "memory 96%".to_string())),
             power: PowerSample {
@@ -143,6 +150,13 @@ mod tests {
             "the NaN reading is skipped"
         );
         assert_eq!(count(&c, "SELECT COUNT(*) FROM procstat"), 1);
+        assert_eq!(
+            count(
+                &c,
+                "SELECT COUNT(*) FROM sysstat WHERE cpu_mhz = 4200 AND gpu_mhz IS NULL"
+            ),
+            1
+        );
         // the alert points at the sysstat row, not at the rows inserted with it
         let (ref_id, id): (i64, i64) = c
             .query_row(

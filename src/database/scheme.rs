@@ -1,6 +1,6 @@
 pub(super) const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS messages (
-        source   TEXT    NOT NULL,   -- the table of the row: 'custom', 'journald', 'auditd', 'sysstat', 'boot', 'packages'
+        source   TEXT    NOT NULL,   -- the table of the row: 'custom', 'journald', 'auditd', 'sysstat', 'boot', 'packages', 'profiles', 'spikes'
         ref_id   INTEGER NOT NULL,   -- id of the row in that source's own table
         ts       TEXT    NOT NULL,   -- UTC 'YYYY-MM-DD HH:MM:SS'
         severity TEXT    NOT NULL,   -- 'error' | 'warning' | 'info'
@@ -49,7 +49,9 @@ pub(super) const SCHEMA: &str = "
         load_avg    REAL,
         gpu_pct     REAL,
         gpu_mem_pct REAL,
-        gpu_temp    REAL
+        gpu_temp    REAL,
+        cpu_mhz     REAL,              -- the fastest core at that instant: shows boosting
+        gpu_mhz     REAL               -- the GPU graphics clock, with the other gpu_ columns
     );
     CREATE INDEX IF NOT EXISTS idx_sysstat_ts ON sysstat(ts);
 
@@ -105,11 +107,56 @@ pub(super) const SCHEMA: &str = "
         rss_kb      INTEGER NOT NULL,
         pss_kb      INTEGER
     );
-    CREATE INDEX IF NOT EXISTS idx_procstat_ts ON procstat(ts)
+    CREATE INDEX IF NOT EXISTS idx_procstat_ts ON procstat(ts);
+
+    CREATE TABLE IF NOT EXISTS profiles (
+        profile_id  INTEGER PRIMARY KEY,
+        ts          TEXT    NOT NULL,  -- when the change was seen (within 10 s of it)
+        daemon      TEXT    NOT NULL,  -- 'power-profiles-daemon' | 'tccd'
+        profile     TEXT    NOT NULL   -- the profile it switched to
+    );
+    CREATE INDEX IF NOT EXISTS idx_profiles_ts ON profiles(ts);
+
+    CREATE TABLE IF NOT EXISTS spikes (
+        spike_id     INTEGER PRIMARY KEY,
+        ts           TEXT    NOT NULL,
+        temp         REAL    NOT NULL, -- CPU package C when it triggered
+        rise         REAL    NOT NULL, -- C gained over the 3 s before
+        cpu_mhz      REAL,             -- the fastest core
+        cpu_watt     REAL,             -- CPU package over the second measured, RAPL
+        on_ac        INTEGER,          -- 1 on mains, 0 on battery
+        ppd_profile  TEXT,             -- power-profiles-daemon's active profile
+        tccd_profile TEXT,             -- tccd's active profile
+        spotify      TEXT,             -- 'Playing' | 'Paused' | 'Stopped'; NULL when not running
+        gpu_procs    TEXT              -- nvidia-smi pmon, one 'pid comm type sm%' line each; NULL while the GPU sleeps
+    );
+    CREATE INDEX IF NOT EXISTS idx_spikes_ts ON spikes(ts);
+
+    CREATE TABLE IF NOT EXISTS spike_procs (
+        spike_proc_id INTEGER PRIMARY KEY,
+        ts            TEXT    NOT NULL, -- the spike's ts
+        spike_id      INTEGER NOT NULL,
+        pid           INTEGER NOT NULL,
+        comm          TEXT,
+        cpu_pct       REAL    NOT NULL, -- of one core, over the second measured: 200 = two cores
+        ctxt_per_s    REAL              -- context switches per second, all its threads, over the 0.5 s after
+    );
+    CREATE INDEX IF NOT EXISTS idx_spike_procs_ts ON spike_procs(ts)
 
 ";
 
-pub(super) const TIME_TABLES: [&str; 10] = [
-    "messages", "custom", "journald", "auditd", "sysstat", "power", "sensors", "boot", "packages",
+pub(super) const TIME_TABLES: [&str; 13] = [
+    "messages",
+    "custom",
+    "journald",
+    "auditd",
+    "sysstat",
+    "power",
+    "sensors",
+    "boot",
+    "packages",
     "procstat",
+    "profiles",
+    "spikes",
+    "spike_procs",
 ];

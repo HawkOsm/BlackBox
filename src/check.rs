@@ -3,7 +3,7 @@
 
 use crate::database;
 use crate::sources::follow::auditd;
-use crate::sources::poll::packages;
+use crate::sources::poll::{packages, profiles, spike};
 use std::process::Command;
 
 fn os_name() -> String {
@@ -83,6 +83,22 @@ fn cpu_watts() -> String {
     }
 }
 
+fn power_profiles() -> String {
+    let show = |p: Option<String>| p.unwrap_or_else(|| "not running".to_string());
+    format!(
+        "power-profiles-daemon: {}, tccd: {}",
+        show(profiles::read_ppd()),
+        show(profiles::read_tccd())
+    )
+}
+
+fn spikes() -> String {
+    match spike::package_sensor() {
+        Some(path) => format!("watching {}", path.display()),
+        None => "no CPU package temperature found: spikes are not watched".to_string(),
+    }
+}
+
 pub fn run() {
     println!("blackbox {} on {}", env!("CARGO_PKG_VERSION"), os_name());
     let db = database::db_path();
@@ -96,6 +112,8 @@ pub fn run() {
         ("journal", vec![journal()]),
         ("gpu", vec![gpu()]),
         ("cpu watts", vec![cpu_watts()]),
+        ("profiles", vec![power_profiles()]),
+        ("spikes", vec![spikes()]),
     ];
     for (label, lines) in rows {
         for (i, line) in lines.iter().enumerate() {

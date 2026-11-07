@@ -10,6 +10,8 @@ SOURCES = [
     ("sysstat", "System"),
     ("boot", "Boots"),
     ("packages", "Changes"),
+    ("spikes", "Heat"),
+    ("profiles", "Profiles"),
 ]
 LABEL = dict(SOURCES)
 PAGE_ROWS = 200  # rows read from the database per page

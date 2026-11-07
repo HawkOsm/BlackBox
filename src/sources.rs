@@ -9,6 +9,8 @@
 //! | `follow/` | `auditd`    | `tail -F /var/log/audit/audit.log`                 | `auditd`                                  |
 //! | `poll/`   | `sampler`   | `/proc`, `/sys`, `nvidia-smi`, every 10 s          | `sysstat`, `power`, `sensors`, `procstat` |
 //! | `poll/`   | `packages`  | pacman, apt, zypper and dnf history, every 30 s    | `packages`                                |
+//! | `poll/`   | `profiles`  | power-profiles-daemon and tccd over D-Bus, 10 s    | `profiles`, on change                     |
+//! | `poll/`   | `spike`     | the CPU package temperature, every second          | `spikes`, `spike_procs`, on a spike       |
 //! | `once/`   | `boot`      | the previous boot's last journal entry             | `boot`                                    |
 //!
 //! `follow/` and `poll/` each hold their group's loop once; `supervise.rs` runs every source but
@@ -33,6 +35,8 @@ pub fn run() {
     follow::auditd::start();
     poll::sampler::start();
     poll::packages::start();
+    poll::profiles::start();
+    poll::spike::start();
     once::boot::start();
     kernel::collector::listen(socket);
     crate::database::drain();

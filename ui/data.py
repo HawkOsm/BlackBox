@@ -14,6 +14,8 @@ TABLES = {
     "sysstat": "sysstat_id",
     "boot": "boot_id",
     "packages": "package_id",
+    "profiles": "profile_id",
+    "spikes": "spike_id",
 }
 QUERY_SECONDS = 8
 # chart series fed from the `sensors` table: key -> (kind, SQL LIKE pattern of the sensor name).

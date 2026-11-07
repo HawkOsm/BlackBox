@@ -3,12 +3,16 @@
 //!
 //! - `sampler/`: `/proc`, `/sys` (hwmon, RAPL, battery) and `nvidia-smi`, every 10 s.
 //! - `packages/`: the pacman, apt, zypper and dnf histories, every 30 s.
+//! - `profiles/`: the power profiles (power-profiles-daemon, tccd), every 10 s, stored on change.
+//! - `spike/`: the CPU package temperature every second; what was running when it jumps.
 //!
 //! The loop is here, once; each source says only how often and what one look does (the Strategy
 //! pattern).
 
 pub mod packages;
+pub mod profiles;
 pub mod sampler;
+pub mod spike;
 
 use std::time::Duration;
 

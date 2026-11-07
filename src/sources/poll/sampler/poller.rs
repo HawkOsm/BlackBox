@@ -1,4 +1,5 @@
 use super::alert::assess;
+use super::cpufreq::read_max_mhz;
 use super::gpu::read_gpu;
 use super::power::Power;
 use super::proc::{CpuTimes, read_cpu, read_disk_sectors, read_load, read_mem_pct, read_top_procs};
@@ -46,15 +47,17 @@ impl Poller for Sampler {
                     mem_pct: mem,
                     disk_io_kb: disk_kb,
                     load_avg: load,
-                    gpu_pct: gpu.map(|g| g.0),
-                    gpu_mem_pct: gpu.map(|g| g.1),
-                    gpu_temp: gpu.map(|g| g.2),
+                    gpu_pct: gpu.map(|g| g.pct),
+                    gpu_mem_pct: gpu.map(|g| g.mem_pct),
+                    gpu_temp: gpu.map(|g| g.temp),
+                    cpu_mhz: read_max_mhz(),
+                    gpu_mhz: gpu.and_then(|g| g.mhz),
                 };
                 database::write(Tick {
                     ts,
                     alert: assess(&sample, self.cores),
                     sample,
-                    power: self.power.sample(gpu.and_then(|g| g.3)),
+                    power: self.power.sample(gpu.and_then(|g| g.watt)),
                     sensors: self.sensors.read(),
                     procs: if self.tick % 3 == 1 {
                         read_top_procs(5)
