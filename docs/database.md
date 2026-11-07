@@ -24,7 +24,7 @@ Every alert, from every source, is one row here, so a list of events needs no jo
 
 | Column | |
 |---|---|
-| `source` | the table of the full row: `custom`, `journald`, `auditd`, `sysstat`, `boot`, `packages` |
+| `source` | the table of the full row: `custom`, `journald`, `auditd`, `sysstat`, `boot`, `packages`, `profiles`, `spikes` |
 | `ref_id` | the id of that row in its table (`custom_id`, `journald_id`, …) |
 | `ts` | when it happened |
 | `severity` | `error`, `warning` or `info` |
@@ -45,7 +45,7 @@ crosses a threshold, and a successful sudo is kept in `auditd` without an alert.
 |---|---|
 | `custom_id`, `ts` | |
 | `pid`, `ppid` | the process and its parent |
-| `exit_code` | the raw wait status: `exit_code & 127` is the signal that killed it (0 if none), `exit_code & 128` a core dump, `exit_code >> 8` the exit status. See "Reading an exit code" in [architecture.md](architecture.md). |
+| `exit_code` | the raw wait status: `exit_code & 127` is the signal that killed it (0 if none), `exit_code & 128` a core dump, `exit_code >> 8` the exit status. See "Reading an exit code" in [architecture/kernel.md](architecture/kernel.md). |
 | `comm` | its name, best effort: a very short-lived process is often gone before it can be read |
 | `exe` | its full path, filled in afterwards from systemd-coredump for crashes that dumped core |
 
@@ -76,8 +76,9 @@ is stored as `info`.
 
 ### `sysstat`: the system, every 10 s (sampler)
 
-`sysstat_id`, `ts`, `cpu_pct`, `mem_pct`, `disk_io_kb` (KB/s), `load_avg`, and `gpu_pct`,
-`gpu_mem_pct`, `gpu_temp` (every third sample, while the GPU is awake). An alert only past a
+`sysstat_id`, `ts`, `cpu_pct`, `mem_pct`, `disk_io_kb` (KB/s), `load_avg`, `cpu_mhz` (the fastest
+core at that instant: shows boosting), and `gpu_pct`, `gpu_mem_pct`, `gpu_temp`, `gpu_mhz` (every
+third sample, while the GPU is awake). An alert only past a
 threshold: memory 85% (95% is an error), CPU 90%, load above twice the cores, GPU 85 °C or 90% of
 its memory.
 
@@ -105,6 +106,35 @@ its memory.
 
 `procstat_id`, `ts`, `pid`, `comm`, `rss_kb`, and `pss_kb` (the accurate share, NULL when it
 could not be read). Five rows per sample.
+
+### `profiles`: power profile changes (profiles)
+
+| Column | |
+|---|---|
+| `profile_id`, `ts` | when the change was seen, within 10 s of it |
+| `daemon` | `power-profiles-daemon` or `tccd` |
+| `profile` | the profile it switched to: `balanced`, or a tccd profile's name |
+
+A row only on a change, and one when a daemon is first seen. Listed as `info`.
+
+### `spikes` and `spike_procs`: what ran when the CPU heated up (spike)
+
+`spikes`, one row per spike (+15 C in 3 s, or 80 C; at most one a minute), listed as `warning`:
+
+| Column | |
+|---|---|
+| `spike_id`, `ts` | |
+| `temp`, `rise` | the CPU package in C, and how much it rose over the 3 s before (negative while cooling from a hot stretch) |
+| `cpu_mhz`, `cpu_watt` | the fastest core, and the package watts over the second measured |
+| `on_ac` | 1 on mains, 0 on battery |
+| `ppd_profile`, `tccd_profile` | the active profiles |
+| `spotify` | `Playing`, `Paused`, `Stopped`; NULL when Spotify or `playerctl` is not there |
+| `gpu_procs` | from `nvidia-smi pmon`, one `pid comm type sm%` line per process; NULL while the GPU sleeps |
+
+`spike_procs`, the up to 5 busiest processes of each spike: `spike_proc_id`, `ts` (the spike's),
+`spike_id`, `pid`, `comm`, `cpu_pct` (of one core, over that second: 200 is two full cores), and
+`ctxt_per_s` (context switches a second, all threads, counted over the 0.5 s after that second;
+NULL when a thread exited mid-read).
 
 ### `boot`: boots (boot)
 
@@ -149,6 +179,10 @@ WHERE c.custom_id = 4242 AND p.ts BETWEEN datetime(c.ts, '-7 days') AND c.ts;
 -- the hottest the CPU got each day
 SELECT date(ts), MAX(value) FROM sensors
 WHERE kind = 'temp' AND name LIKE 'coretemp/Package%' GROUP BY 1;
+
+-- what was running in each spike, with the profile at the time
+SELECT datetime(s.ts, 'localtime'), s.temp, s.tccd_profile, s.spotify, p.comm, p.cpu_pct, p.ctxt_per_s
+FROM spikes s JOIN spike_procs p USING (spike_id) ORDER BY s.ts DESC, p.cpu_pct DESC;
 
 -- which programs crash most
 SELECT comm, COUNT(*) FROM custom WHERE exit_code & 127 != 0 GROUP BY comm ORDER BY 2 DESC;

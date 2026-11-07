@@ -82,7 +82,7 @@ What makes it both cheap and trustworthy:
   machine's NVMe), and it does not grow with the database size.
 
 The full design, with the measurements behind each decision, is in
-[docs/architecture.md](docs/architecture.md).
+[docs/architecture/](docs/architecture/README.md).
 
 ## What it costs
 
@@ -240,7 +240,7 @@ that says what the folder is for and lists its files.
 
 ## Docs
 
-- [docs/architecture.md](docs/architecture.md): how it works, source by source, with measurements.
+- [docs/architecture/](docs/architecture/README.md): how it works, source by source, with measurements.
 - [docs/database.md](docs/database.md): every table and column, and how to query them.
 - [docs/development.md](docs/development.md): building, testing, running it against a throwaway
   database, counting commits.

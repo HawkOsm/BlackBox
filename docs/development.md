@@ -1,7 +1,7 @@
 # Development
 
 How to build BlackBox, test it, run it without touching your real recording, and prove a change
-works. The structure of the code is in [architecture.md](architecture.md); adding a new source is
+works. The structure of the code is in [architecture/](architecture/README.md); adding a new source is
 in [adding-a-source.md](adding-a-source.md).
 
 ## Build

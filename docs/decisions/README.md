@@ -2,7 +2,7 @@
 
 One file per decision that had real alternatives: the problem, the options, what was chosen and
 why, and what it costs. The short version of each is a row in the "Design decisions" table in
-[architecture.md](../architecture.md); these files keep the reasoning, including the options that
+[architecture/](../architecture/README.md); these files keep the reasoning, including the options that
 lost and the mistakes made on the way, which a table has no room for.
 
 | # | Decision | Status |

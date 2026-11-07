@@ -5,7 +5,7 @@ whole recipe, worked through with a real example: memory pressure from `/proc/pr
 read every 10 s, with an alert when the machine is thrashing. Every piece of code below was built,
 tested and run against a throwaway database before it was written here.
 
-Read [architecture.md](architecture.md), "Sources and the writer", first: it explains why the code
+Read [architecture/writer.md](architecture/writer.md) first: it explains why the code
 is shaped this way. The decisions behind it are in [decisions/](decisions/).
 
 ## 1. Pick the group
@@ -247,7 +247,7 @@ sqlite3 /tmp/try.db "SELECT COUNT(*), MAX(some_avg10) FROM pressure"
 
 With the example: two rows in the first 14 s, one at once and one 10 s later.
 
-Last, the docs: a section under "Components" in [architecture.md](architecture.md) (what it
+Last, the docs: a file or section under [architecture/](architecture/README.md) (what it
 reads, what it stores, when it alerts, measured numbers), a row in the overview table in
 `src/sources.rs`, the table in [database.md](database.md), and a file in [decisions/](decisions/)
 if building it meant choosing between real alternatives.

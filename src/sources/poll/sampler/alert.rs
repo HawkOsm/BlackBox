@@ -1,4 +1,4 @@
-//! When a sample is worth an alert: the thresholds in `docs/architecture.md`.
+//! When a sample is worth an alert: the thresholds in `docs/architecture/sampler.md`.
 
 use super::store::Sample;
 use crate::database::Severity;
