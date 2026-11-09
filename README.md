@@ -101,7 +101,7 @@ reclaim those pages at any time.
 
 ## Install
 
-You need Rust 1.88 or newer, a C compiler and SQLite's development files. The viewer also needs
+You need Rust 1.89 or newer, a C compiler and SQLite's development files. The viewer also needs
 PyGObject with GTK 4 and libadwaita. On a server without them, the viewer is skipped and the
 recorder still runs.
 
@@ -109,7 +109,7 @@ recorder still runs.
 |---|---|---|
 | Arch | `sudo pacman -S --needed rust sqlite` | `python-gobject gtk4 libadwaita` |
 | Debian, Ubuntu | `sudo apt install build-essential libsqlite3-dev`, Rust from [rustup](https://rustup.rs) (the packaged one is too old) | `python3-gi gir1.2-gtk-4.0 gir1.2-adw-1` |
-| Fedora, RHEL, Rocky, Alma | `sudo dnf install cargo gcc sqlite-devel` (or rustup if dnf's Rust is older than 1.88) | `python3-gobject gtk4 libadwaita` |
+| Fedora, RHEL, Rocky, Alma | `sudo dnf install cargo gcc sqlite-devel` (or rustup if dnf's Rust is older than 1.89) | `python3-gobject gtk4 libadwaita` |
 | openSUSE | `sudo zypper install cargo gcc sqlite3-devel` | `python3-gobject typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1` |
 
 ```bash

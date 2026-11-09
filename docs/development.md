@@ -6,7 +6,7 @@ in [adding-a-source.md](adding-a-source.md).
 
 ## Build
 
-Rust 1.88 or newer (`rust-version` in `Cargo.toml`, edition 2024), a C compiler and SQLite's
+Rust 1.89 or newer (`rust-version` in `Cargo.toml`, edition 2024), a C compiler and SQLite's
 development files. The packages per distribution are in the [README](../README.md#install). The
 viewer is Python with GTK 4 and libadwaita and is not built.
 
@@ -121,7 +121,7 @@ writer thread this gave 207 before and 37 to 47 after. If the count is 0, the li
 | Job | What |
 |---|---|
 | Rust | `cargo fmt --check`, `clippy`, `cargo test` |
-| Rust 1.88 | the tests on the minimum supported version |
+| Rust 1.89 | the tests on the minimum supported version |
 | Distributions | build and test inside Arch, Debian 13, Ubuntu 24.04, Fedora (dnf5), Rocky 9 (dnf4), openSUSE Tumbleweed, then `--check` must find that distribution's package history (`.github/scripts/distro-test.sh`, also runnable locally with podman) |
 | Shell | `shellcheck` on the deploy scripts |
 | Dependency audit | `cargo audit` |
