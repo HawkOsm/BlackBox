@@ -6,8 +6,8 @@ system load. A desktop app shows any of those moments together with everything e
 happening on the machine at the time.
 
 > **Runs on any systemd Linux.** It reads package history from pacman (Arch), apt (Debian, Ubuntu),
-> dnf (Fedora, RHEL, Rocky, Alma) and zypper (openSUSE), and CI builds and tests it on each of those
-> distributions. It needs systemd and journald, and reads NVIDIA GPU stats if `nvidia-smi` exists.
+> dnf (Fedora, RHEL, Rocky, Alma) and zypper (openSUSE). CI builds and tests it on Arch, Debian, Ubuntu,
+> Fedora and openSUSE; RHEL-family 9 is not supported (its SQLite is too old). It needs systemd and journald, and reads NVIDIA GPU stats if `nvidia-smi` exists.
 
 ![The Blackbox app: recorded problems on the left, each with a 24-hour sparkline; on the right the day at a glance, with events, usage, temperature and power on one time axis, and the running processes with pause, end task and force kill](docs/screenshot.webp)
 
@@ -109,7 +109,7 @@ recorder still runs.
 |---|---|---|
 | Arch | `sudo pacman -S --needed rust sqlite` | `python-gobject gtk4 libadwaita` |
 | Debian, Ubuntu | `sudo apt install build-essential libsqlite3-dev`, Rust from [rustup](https://rustup.rs) (the packaged one is too old) | `python3-gi gir1.2-gtk-4.0 gir1.2-adw-1` |
-| Fedora, RHEL, Rocky, Alma | `sudo dnf install cargo gcc sqlite-devel` (or rustup if dnf's Rust is older than 1.89) | `python3-gobject gtk4 libadwaita` |
+| Fedora, RHEL, Rocky, Alma (RHEL-family 10+; 9's SQLite is too old) | `sudo dnf install cargo gcc sqlite-devel` (or rustup if dnf's Rust is older than 1.89) | `python3-gobject gtk4 libadwaita` |
 | openSUSE | `sudo zypper install cargo gcc sqlite3-devel` | `python3-gobject typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1` |
 
 ```bash
@@ -261,7 +261,7 @@ About 80 tests, each next to the code it tests, plus end-to-end tests of the rea
 they cover, and the rule that a test must be seen to fail, are in
 [docs/development.md](docs/development.md).
 
-CI also runs `.github/scripts/distro-test.sh` inside Arch, Debian, Ubuntu, Fedora, Rocky Linux and
+CI also runs `.github/scripts/distro-test.sh` inside Arch, Debian, Ubuntu, Fedora and
 openSUSE containers. It builds and tests there, installs a package, and checks that the recorder
 finds that package in the distribution's real history. To run it locally:
 

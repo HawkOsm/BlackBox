@@ -28,7 +28,7 @@ tests or the machine, not from an opinion.
    `fsync`/`fdatasync` (strace is not installed); before and after, same run length.
 7. **`blackbox --check`** still reports every source.
 
-CI's distribution job (Arch, Debian, Ubuntu, Fedora, Rocky, openSUSE) is the only check for apt,
+CI's distribution job (Arch, Debian, Ubuntu, Fedora, openSUSE) is the only check for apt,
 dnf and zypper on real systems: it runs on push.
 
 ## Report

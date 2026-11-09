@@ -122,7 +122,7 @@ writer thread this gave 207 before and 37 to 47 after. If the count is 0, the li
 |---|---|
 | Rust | `cargo fmt --check`, `clippy`, `cargo test` |
 | Rust 1.89 | the tests on the minimum supported version |
-| Distributions | build and test inside Arch, Debian 13, Ubuntu 24.04, Fedora (dnf5), Rocky 9 (dnf4), openSUSE Tumbleweed, then `--check` must find that distribution's package history (`.github/scripts/distro-test.sh`, also runnable locally with podman) |
+| Distributions | build and test inside Arch, Debian 13, Ubuntu 24.04, Fedora (dnf5), openSUSE Tumbleweed, then `--check` must find that distribution's package history (`.github/scripts/distro-test.sh`, also runnable locally with podman) |
 | Shell | `shellcheck` on the deploy scripts |
 | Dependency audit | `cargo audit` |
 | Python UI | `ruff` |

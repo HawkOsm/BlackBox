@@ -69,7 +69,6 @@ jobs:
           - { name: Debian 13 (apt), image: "debian:trixie" }
           - { name: Ubuntu 24.04 (apt), image: "ubuntu:24.04" }
           - { name: Fedora (dnf5), image: "fedora:latest" }
-          - { name: Rocky Linux 9 (dnf4), image: "rockylinux/rockylinux:9" }
           - { name: openSUSE Tumbleweed (zypper), image: "opensuse/tumbleweed:latest" }
     defaults:
       run:
